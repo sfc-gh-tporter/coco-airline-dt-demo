@@ -1,0 +1,50 @@
+-- scripts/apply_baseline.sql
+-- FROM-SCRATCH rebuild manifest. The per-object files under sql/ are the source of
+-- truth; run them in the order below. The new Snowflake CLI runs one file per
+-- invocation, so execute each with:  snow sql -f <path> --connection prod
+-- (or paste into a worksheet). CoCo can also run them directly.
+--
+-- Most demos do NOT need this - use scripts/reset.sql between runs. This is only for
+-- standing the whole environment up from nothing (new account, etc.).
+-- =====================================================================================
+--
+-- 1) ACCOUNT (run as ACCOUNTADMIN - one time):
+--      sql/00_account/01_role.sql
+--      sql/00_account/02_warehouse.sql
+--      sql/00_account/03_database.sql
+--      sql/00_account/04_schemas.sql
+--      sql/00_account/05_service_user.sql        (paste the public key from keys/rsa_key.pub)
+--
+-- 2) STAGING (role PROD_GH_ACTIONS_DEPLOY_RL):
+--      sql/staging/tables/flights.sql
+--      sql/staging/tables/bookings.sql
+--      sql/staging/tables/flight_status_events.sql
+--      sql/staging/tables/pipeline_audit.sql
+--      sql/staging/streams/bookings_stream.sql
+--      sql/staging/streams/flights_stream.sql
+--      sql/staging/streams/flight_status_events_stream.sql
+--
+-- 3) DATA GENERATION procedures:
+--      sql/data_gen/sp_gen_seed.sql
+--      sql/data_gen/sp_gen_bookings.sql
+--      sql/data_gen/sp_gen_bookings_bulk.sql
+--      sql/data_gen/sp_gen_events.sql
+--      sql/data_gen/sp_generate_airline_data.sql
+--
+-- 4) CURATED legacy pipeline:
+--      sql/curated/tables/route_daily_performance.sql
+--      sql/curated/procedures/sp_rebuild_route_daily_performance.sql
+--      sql/curated/tasks/refresh_route_daily_performance_task.sql
+--
+-- 5) GENERATE DATA (>=1GB/table; use a larger warehouse for speed, then resize back):
+--      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XLARGE';
+--      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'ALL');
+--      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XSMALL';
+--      -- reset streams to empty so the first live batch is the only pending change:
+--      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.BOOKINGS_STREAM ON TABLE AIRLINE_PROD.STAGING.BOOKINGS APPEND_ONLY = TRUE;
+--      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.FLIGHTS_STREAM ON TABLE AIRLINE_PROD.STAGING.FLIGHTS APPEND_ONLY = TRUE;
+--      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS_STREAM ON TABLE AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS APPEND_ONLY = TRUE;
+--      CALL AIRLINE_PROD.CURATED.SP_REBUILD_ROUTE_DAILY_PERFORMANCE();
+--
+-- NOTE: sql/curated/dynamic_tables/ and sql/teardown/ are the DEMO cutover artifacts.
+--       Do NOT apply them at baseline - they are deployed live during the demo.

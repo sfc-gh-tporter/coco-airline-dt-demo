@@ -1,0 +1,15 @@
+-- 00_account/05_service_user.sql
+-- TYPE=SERVICE user for GitHub Actions. Key-pair (JWT) auth only, no password.
+-- The matching private key (keys/rsa_key.p8) is stored as the GitHub secret
+-- SNOWFLAKE_PRIVATE_KEY. Rotate by replacing both this key and the secret.
+
+USE ROLE ACCOUNTADMIN;
+
+CREATE USER IF NOT EXISTS SVC_GH_ACTIONS_AIRLINE
+  TYPE = SERVICE
+  DEFAULT_ROLE = PROD_GH_ACTIONS_DEPLOY_RL
+  DEFAULT_WAREHOUSE = AIRLINE_DEMO_WH
+  RSA_PUBLIC_KEY = 'MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA0XlDKPxPyVdOjbTMPWKI+QjkuisZZQQZ+i2wnMlUdjJqx5F6eYZoAf39qgzesciKBcZrJSFd+vgYDar1/Fk1Yy60zeQ++r5U7q7v7RF0mfBpd63zCDlANUFmJ+SzZq1Wd16Fs5vPSTGQwSM+qw/p1ONDQY//gacB0NL2d4mQpIxUBx2I9pcstRWTYVEMWICZlKCWjKp0NSKH5MlUICNcrKHHqfiXyYn11Rp4zRnW6l7jLJofvnJrQEWGP9XNs2xpmo99+icL/V9/upTtc0SGir53JRPy+3Sx/04YxII7MkBF7T6F8FCts/jz8HX23YB24HdpkRCPTG7MNtihra9apd1gP9wSnV6r6MKSO/tEigelOgnmUyiZgnJtuWbkoeV0aE0V7lM0urz/RcTebm4s0dU/9HpLqpyn/ocZjKJ4ktT7XjyhEVQhTVdrZizaN1xVu+7hoUgGt0GpFutvaSDWq1znZrn9iKTOt/MxSxXJfrWPWAx8Jgay6qWUhw56hkj/I7wuXRCPgitlIKgZMhLRSzCDsEkGAnR8PPupwGo4dkk9VQnaNtEgJ9Bnq7Ns8qJ+klbV6FMh5a6BMe8Cn7w+vr7JsXqWOvyH4ZPut3Nqu/Yujrs1UXy9kLnpM69IClMnYARXwv/u6iuOs2gpJbjFhtLYQbsu8AiBLY6bO2USGOcCAwEAAQ=='
+  COMMENT = 'Service account for GitHub Actions deployments to AIRLINE_PROD';
+
+GRANT ROLE PROD_GH_ACTIONS_DEPLOY_RL TO USER SVC_GH_ACTIONS_AIRLINE;

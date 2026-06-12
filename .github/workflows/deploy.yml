@@ -1,0 +1,61 @@
+name: Deploy Airline Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sql/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-airline-pipeline
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Snowflake CLI
+        run: pip install --quiet snowflake-cli-labs
+
+      - name: Configure Snowflake connection (key-pair JWT)
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+        run: |
+          mkdir -p "$HOME/.snowflake"
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$HOME/.snowflake/rsa_key.p8"
+          chmod 600 "$HOME/.snowflake/rsa_key.p8"
+          cat > "$HOME/.snowflake/config.toml" <<EOF
+          default_connection_name = "prod"
+
+          [connections.prod]
+          account = "$SNOWFLAKE_ACCOUNT"
+          user = "$SNOWFLAKE_USER"
+          authenticator = "SNOWFLAKE_JWT"
+          private_key_path = "$HOME/.snowflake/rsa_key.p8"
+          role = "$SNOWFLAKE_ROLE"
+          warehouse = "$SNOWFLAKE_WAREHOUSE"
+          database = "$SNOWFLAKE_DATABASE"
+          EOF
+          chmod 600 "$HOME/.snowflake/config.toml"
+
+      - name: Test connection
+        run: snow connection test --connection prod
+
+      - name: Deploy changed SQL
+        run: bash scripts/deploy.sh "${{ github.event.before }}" "${{ github.sha }}"
