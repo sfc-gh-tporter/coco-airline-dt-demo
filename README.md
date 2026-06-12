@@ -57,9 +57,11 @@ sql/data_gen/                         Faker-seed + SQL-bulk generation sprocs
 sql/curated/tables/                   route_daily_performance (legacy target)
 sql/curated/procedures/               sp_rebuild_route_daily_performance (the inefficiency)
 sql/curated/tasks/                    refresh_route_daily_performance_task
-sql/curated/dynamic_tables/           route_daily_performance_dt (the payoff - deployed live)
-sql/teardown/                         decommission_legacy_pipeline (deployed live)
 keys/                                 RSA keypair (GITIGNORED)
+
+(The incremental dynamic table and the legacy teardown are authored LIVE during the
+ demo by CoCo - they are NOT on main. A validated reference copy lives on the
+ `solution` branch for the presenter only, as a cherry-pick safety net.)
 ```
 
 ---
@@ -80,15 +82,16 @@ CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'BULK');
 
 1. Walk the existing pipeline: `scripts/presenter_walkthrough.sql`
    (show streams, resume the task, run a `LIVE` batch, show the full-recompute cost).
-2. Clone production:
+2. Clone production (as SYSADMIN):
    ```sql
-   CREATE DATABASE AIRLINE_PROD_DEV_CL CLONE AIRLINE_PROD;
+   USE ROLE sysadmin;
+   CREATE OR REPLACE DATABASE AIRLINE_PROD_DEV_CL CLONE AIRLINE_PROD;
    ```
 3. Ask CoCo (with `/dynamic-tables`) to convert the stream+task pipeline to an
-   **INCREMENTAL** Dynamic Table in `AIRLINE_PROD_DEV_CL`.
+   **INCREMENTAL** Dynamic Table in `AIRLINE_PROD_DEV_CL` (let it derive the DDL).
 4. Validate the DDL yourself in the clone (refresh_mode = INCREMENTAL, row parity).
 5. Have CoCo commit the DT to `main` and push -> GitHub Actions deploys to prod.
-6. Decommission the legacy stream + task + target via `sql/teardown/`.
+6. Have CoCo author and deploy the legacy teardown (drop the streams + task + proc + target).
 
 ## 3. Reset
 

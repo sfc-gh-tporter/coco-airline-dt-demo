@@ -46,5 +46,6 @@
 --      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS_STREAM ON TABLE AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS APPEND_ONLY = TRUE;
 --      CALL AIRLINE_PROD.CURATED.SP_REBUILD_ROUTE_DAILY_PERFORMANCE();
 --
--- NOTE: sql/curated/dynamic_tables/ and sql/teardown/ are the DEMO cutover artifacts.
---       Do NOT apply them at baseline - they are deployed live during the demo.
+-- NOTE: The incremental dynamic table and the legacy teardown are authored LIVE during
+--       the demo (not part of baseline). They are not on main; a validated reference copy
+--       lives on the `solution` branch for the presenter only.
