@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS AIRLINE_PROD.CURATED.ROUTE_DAILY_PERFORMANCE (
   seat_capacity       NUMBER(38,0),
   load_factor         NUMBER(9,4),       -- seats_sold / seat_capacity
   avg_delay_minutes   NUMBER(9,2),
-  on_time_pct         NUMBER(6,2),       -- % of flights with delay <= 15 min
-  last_rebuilt_ts     TIMESTAMP_NTZ
+  on_time_pct         NUMBER(6,2)        -- % of flights with delay <= 15 min
 )
 COMMENT = 'Route x day performance KPI (legacy full-recompute target)';

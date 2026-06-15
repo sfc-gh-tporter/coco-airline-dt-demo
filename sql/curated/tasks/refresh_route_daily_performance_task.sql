@@ -14,7 +14,7 @@ CREATE OR REPLACE TASK AIRLINE_PROD.CURATED.REFRESH_ROUTE_DAILY_PERFORMANCE_TASK
 AS
   INSERT OVERWRITE INTO AIRLINE_PROD.CURATED.ROUTE_DAILY_PERFORMANCE
     (route, flight_date, seats_sold, revenue_usd, seat_capacity,
-     load_factor, avg_delay_minutes, on_time_pct, last_rebuilt_ts)
+     load_factor, avg_delay_minutes, on_time_pct)
   WITH flight_delay AS (
     SELECT e.flight_id,
            AVG(e.payload:delay_minutes::NUMBER)                                  AS avg_delay,
@@ -48,8 +48,7 @@ AS
     bk.route, bk.perf_date, bk.seats_sold, bk.revenue_usd, cap.seat_capacity,
     ROUND(bk.seats_sold / NULLIF(cap.seat_capacity, 0), 4),
     ROUND(dly.avg_delay_minutes, 2),
-    ROUND(dly.on_time_pct, 2),
-    CURRENT_TIMESTAMP()
+    ROUND(dly.on_time_pct, 2)
   FROM bk
   LEFT JOIN cap ON cap.route = bk.route AND cap.perf_date = bk.perf_date
   LEFT JOIN dly ON dly.route = bk.route AND dly.perf_date = bk.perf_date;
