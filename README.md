@@ -1,10 +1,10 @@
-# CoCo Demo: Streams + Task -> Incremental Dynamic Table (Airlines)
+# CoCo Demo: Full-Refresh Task -> Incremental Dynamic Table (Airlines)
 
 A reusable Cortex Code (CoCo) demo. It starts from a deliberately inefficient
-airline data pipeline (append-only streams used only as a trigger for a
-scheduled **full-recompute** task) and uses CoCo + the `/dynamic-tables` skill to
-convert it into a single **INCREMENTAL Dynamic Table**, validated on a zero-copy
-clone, then deployed to production via **GitHub Actions** with key-pair auth.
+airline data pipeline (a scheduled task that **fully rebuilds** the KPI mart on every
+run) and uses CoCo + the `/dynamic-tables` skill to convert it into a single
+**INCREMENTAL Dynamic Table**, validated on a zero-copy clone, then deployed to
+production via **GitHub Actions** with key-pair auth.
 
 ---
 
@@ -15,18 +15,14 @@ STAGING (1GB+/table, all generated in Snowflake)
   FLIGHTS                (structured dim)
   BOOKINGS               (structured fact)
   FLIGHT_STATUS_EVENTS   (VARIANT / JSON)
-        | append-only streams (BOOKINGS_STREAM, FLIGHTS_STREAM, EVENTS_STREAM)
         v
-  TASK every 5 min, gated by SYSTEM$STREAM_HAS_DATA
-        -> SP_REBUILD_ROUTE_DAILY_PERFORMANCE()
-             1. consume streams into STAGING.PIPELINE_AUDIT (advance offsets)
-             2. CREATE OR REPLACE full scan of ALL history  <-- the inefficiency
+  TASK every 5 min:  INSERT OVERWRITE full scan of ALL history  <-- the inefficiency
         v
 CURATED.ROUTE_DAILY_PERFORMANCE   (route x day KPI)
 
 AFTER (CoCo writes this live):
 CURATED.ROUTE_DAILY_PERFORMANCE_DT  (INCREMENTAL Dynamic Table, TARGET_LAG=1 min)
-  -> one declarative object replaces 3 streams + task + proc + audit + recompute
+  -> one declarative object replaces the full-refresh task + target
 ```
 
 | Object | Name |
@@ -51,12 +47,10 @@ scripts/
   reset.sql                           Drop clone + DT, restore legacy baseline
   presenter_walkthrough.sql           Step-2 live demo script
 sql/00_account/                       role, warehouse, database, schemas, service user
-sql/staging/tables/                   flights, bookings, flight_status_events, pipeline_audit
-sql/staging/streams/                  append-only streams
+sql/staging/tables/                   flights, bookings, flight_status_events
 sql/data_gen/                         Faker-seed + SQL-bulk generation sprocs
 sql/curated/tables/                   route_daily_performance (legacy target)
-sql/curated/procedures/               sp_rebuild_route_daily_performance (the inefficiency)
-sql/curated/tasks/                    refresh_route_daily_performance_task
+sql/curated/tasks/                    refresh_route_daily_performance_task (full-refresh)
 keys/                                 RSA keypair (GITIGNORED)
 
 (The incremental dynamic table and the legacy teardown are authored LIVE during the
@@ -81,17 +75,17 @@ CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'BULK');
 ## 2. Live demo flow (run with customer)
 
 1. Walk the existing pipeline: `scripts/presenter_walkthrough.sql`
-   (show streams, resume the task, run a `LIVE` batch, show the full-recompute cost).
+   (show the legacy task, run a `LIVE` batch, run the task, show the full-recompute cost).
 2. Clone production (as SYSADMIN):
    ```sql
    USE ROLE sysadmin;
    CREATE OR REPLACE DATABASE AIRLINE_PROD_DEV_CL CLONE AIRLINE_PROD;
    ```
-3. Ask CoCo (with `/dynamic-tables`) to convert the stream+task pipeline to an
+3. Ask CoCo (with `/dynamic-tables`) to convert the full-refresh task into an
    **INCREMENTAL** Dynamic Table in `AIRLINE_PROD_DEV_CL` (let it derive the DDL).
 4. Validate the DDL yourself in the clone (refresh_mode = INCREMENTAL, row parity).
 5. Have CoCo commit the DT to `main` and push -> GitHub Actions deploys to prod.
-6. Have CoCo author and deploy the legacy teardown (drop the streams + task + proc + target).
+6. Have CoCo author and deploy the legacy teardown (drop the old task + target table).
 
 ## 3. Reset
 

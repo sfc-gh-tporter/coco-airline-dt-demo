@@ -13,9 +13,7 @@ USE WAREHOUSE airline_demo_wh;
 -- The data: two ~1GB structured facts + one ~1GB VARIANT table, plus a small dim.
 SHOW TABLES IN SCHEMA airline_prod.staging;
 
--- The plumbing the legacy pipeline needs: 3 append-only streams + an audit table.
-SHOW STREAMS IN SCHEMA airline_prod.staging;
-SELECT GET_DDL('PROCEDURE', 'airline_prod.curated.sp_rebuild_route_daily_performance()');
+-- The whole legacy pipeline is a single scheduled task that FULLY rebuilds the mart.
 SELECT GET_DDL('TASK', 'airline_prod.curated.refresh_route_daily_performance_task');
 
 -- The KPI consumers actually use:
@@ -27,9 +25,10 @@ SELECT * FROM airline_prod.curated.route_daily_performance ORDER BY revenue_usd 
 -- Drop a tiny batch of brand-new bookings/events into staging...
 CALL airline_prod.data_gen.sp_generate_airline_data(1.0, 'LIVE');
 
--- ...then resume the legacy task (or call the proc directly) and watch it rescan ~2GB
--- just to reflect a few hundred new rows.
+-- ...then run the legacy task and watch it rescan ALL history (~2GB) just to reflect
+-- a few hundred new rows.
 ALTER TASK airline_prod.curated.refresh_route_daily_performance_task RESUME;
+EXECUTE TASK airline_prod.curated.refresh_route_daily_performance_task;  -- run it now
 
 -- Inspect what the full recompute actually scanned (note bytes/time vs rows changed):
 SELECT query_id, ROUND(total_elapsed_time/1000,1) AS secs,
@@ -52,11 +51,11 @@ CREATE OR REPLACE DATABASE airline_prod_dev_cl CLONE airline_prod;
 -- -------------------------------------------------------------------------------------
 --   Use the /dynamic-tables skill to modernize the pipeline in the airline_prod_dev_cl
 --   database. The staging schema feeds a curated route x day KPI table
---   (airline_prod_dev_cl.curated.route_daily_performance) today via append-only streams
---   plus a scheduled task that fully rebuilds the whole table on every run. Replace that
---   streams + task pattern with a single INCREMENTAL dynamic table in
---   airline_prod_dev_cl.curated that produces the same KPI columns. Confirm it refreshes
---   incrementally, then show me the DDL before creating anything.
+--   (airline_prod_dev_cl.curated.route_daily_performance) today via a scheduled task that
+--   fully rebuilds the whole table on every run. Replace that full-refresh task with a
+--   single INCREMENTAL dynamic table in airline_prod_dev_cl.curated that produces the same
+--   KPI columns. Confirm it refreshes incrementally, then show me the DDL before creating
+--   anything.
 -- -------------------------------------------------------------------------------------
 
 -- -------------------------------------------------------------------------------------
@@ -79,5 +78,5 @@ ALTER DYNAMIC TABLE airline_prod_dev_cl.curated.<dt_name_coco_created> REFRESH;
 
 -- -------------------------------------------------------------------------------------
 -- 6. Cutover: have CoCo commit the new dynamic table to main -> GitHub Actions deploys
---    it to PROD. Then deploy the legacy teardown to remove the old streams + task.
+--    it to PROD. Then deploy the legacy teardown to drop the old task + target table.
 -- -------------------------------------------------------------------------------------

@@ -19,10 +19,6 @@
 --      sql/staging/tables/flights.sql
 --      sql/staging/tables/bookings.sql
 --      sql/staging/tables/flight_status_events.sql
---      sql/staging/tables/pipeline_audit.sql
---      sql/staging/streams/bookings_stream.sql
---      sql/staging/streams/flights_stream.sql
---      sql/staging/streams/flight_status_events_stream.sql
 --
 -- 3) DATA GENERATION procedures:
 --      sql/data_gen/sp_gen_seed.sql
@@ -33,18 +29,14 @@
 --
 -- 4) CURATED legacy pipeline:
 --      sql/curated/tables/route_daily_performance.sql
---      sql/curated/procedures/sp_rebuild_route_daily_performance.sql
---      sql/curated/tasks/refresh_route_daily_performance_task.sql
+--      sql/curated/tasks/refresh_route_daily_performance_task.sql   (full-recompute task)
 --
 -- 5) GENERATE DATA (>=1GB/table; use a larger warehouse for speed, then resize back):
 --      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XLARGE';
 --      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'ALL');
 --      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XSMALL';
---      -- reset streams to empty so the first live batch is the only pending change:
---      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.BOOKINGS_STREAM ON TABLE AIRLINE_PROD.STAGING.BOOKINGS APPEND_ONLY = TRUE;
---      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.FLIGHTS_STREAM ON TABLE AIRLINE_PROD.STAGING.FLIGHTS APPEND_ONLY = TRUE;
---      CREATE OR REPLACE STREAM AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS_STREAM ON TABLE AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS APPEND_ONLY = TRUE;
---      CALL AIRLINE_PROD.CURATED.SP_REBUILD_ROUTE_DAILY_PERFORMANCE();
+--      -- populate the legacy mart once (run the task):
+--      EXECUTE TASK AIRLINE_PROD.CURATED.REFRESH_ROUTE_DAILY_PERFORMANCE_TASK;
 --
 -- NOTE: The incremental dynamic table and the legacy teardown are authored LIVE during
 --       the demo (not part of baseline). They are not on main; a validated reference copy
