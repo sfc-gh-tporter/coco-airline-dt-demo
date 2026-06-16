@@ -28,13 +28,13 @@ CREATE TABLE IF NOT EXISTS airline_prod.curated.route_daily_performance (
   route VARCHAR(7), flight_date DATE, seats_sold NUMBER(38,0), revenue_usd NUMBER(18,2),
   seat_capacity NUMBER(38,0), load_factor NUMBER(9,4), avg_delay_minutes NUMBER(9,2),
   on_time_pct NUMBER(6,2)
-) COMMENT = 'Route x day performance KPI (legacy full-recompute target)';
+) CLUSTER BY (flight_date) COMMENT = 'Route x day performance KPI (legacy full-recompute target)';
 
 -- 3b) legacy full-recompute task (created SUSPENDED), recompute inlined
 CREATE OR REPLACE TASK airline_prod.curated.refresh_route_daily_performance_task
   WAREHOUSE = airline_demo_wh
-  SCHEDULE  = '5 MINUTE'
-  COMMENT   = 'Legacy: full recompute of ROUTE_DAILY_PERFORMANCE every 5 minutes'
+  SCHEDULE  = '10 MINUTE'
+  COMMENT   = 'Legacy: full recompute of ROUTE_DAILY_PERFORMANCE every 10 minutes'
 AS
   INSERT OVERWRITE INTO airline_prod.curated.route_daily_performance
     (route, flight_date, seats_sold, revenue_usd, seat_capacity, load_factor, avg_delay_minutes, on_time_pct)

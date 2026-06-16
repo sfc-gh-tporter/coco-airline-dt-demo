@@ -11,12 +11,12 @@ production via **GitHub Actions** with key-pair auth.
 ## Architecture
 
 ```
-STAGING (1GB+/table, all generated in Snowflake)
+STAGING (~10GB total at SCALE=5, all generated in Snowflake; flight_id ordered by date)
   FLIGHTS                (structured dim)
   BOOKINGS               (structured fact)
   FLIGHT_STATUS_EVENTS   (VARIANT / JSON)
         v
-  TASK every 5 min:  INSERT OVERWRITE full scan of ALL history  <-- the inefficiency
+  TASK every 10 min: INSERT OVERWRITE full scan of ALL history  <-- the inefficiency
         v
 CURATED.ROUTE_DAILY_PERFORMANCE   (route x day KPI)
 
@@ -63,13 +63,15 @@ keys/                                 RSA keypair (GITIGNORED)
 ## 1. Pre-demo setup (already built; rebuild via reset)
 
 Everything in `AIRLINE_PROD` is owned by `PROD_GH_ACTIONS_DEPLOY_RL` and is
-considered production. Data (1GB+/table) is generated in Snowflake by
-`DATA_GEN.SP_GENERATE_AIRLINE_DATA(scale, mode)`.
+considered production. Data (~10GB total at SCALE=5; ~3.2M flights, ~470M bookings, ~344M
+events on a SMALL warehouse) is generated in Snowflake by
+`DATA_GEN.SP_GENERATE_AIRLINE_DATA(scale, mode)`. Facts are written in flight_id(=date)
+order so localized incremental refreshes can prune by date.
 
 To rebuild from scratch run `scripts/apply_baseline.sql` then generate data:
 ```sql
-CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'SEED');
-CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'BULK');
+CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'SEED');
+CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'BULK');
 ```
 
 ## 2. Live demo flow (run with customer)

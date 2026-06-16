@@ -15,9 +15,9 @@ $$
 DECLARE
   max_flight INTEGER;
 BEGIN
-  SELECT MAX(flight_id) INTO :max_flight FROM AIRLINE_PROD.STAGING.FLIGHTS;
+  SELECT MAX(flight_id) INTO :max_flight FROM STAGING.FLIGHTS;
 
-  INSERT INTO AIRLINE_PROD.STAGING.FLIGHT_STATUS_EVENTS
+  INSERT INTO STAGING.FLIGHT_STATUS_EVENTS
     (event_id, flight_id, event_ts, payload)
   WITH g AS (
     SELECT
@@ -29,7 +29,7 @@ BEGIN
     FROM TABLE(GENERATOR(ROWCOUNT => :N_ROWS))
   )
   SELECT
-    AIRLINE_PROD.DATA_GEN.EVENT_SEQ.NEXTVAL,
+    DATA_GEN.EVENT_SEQ.NEXTVAL,
     f.flight_id,
     DATEADD('minute', g.ts_jitter, f.scheduled_dep_ts)::TIMESTAMP_NTZ,
     OBJECT_CONSTRUCT(
@@ -48,7 +48,8 @@ BEGIN
       'source', 'OPS'
     )
   FROM g
-  JOIN AIRLINE_PROD.STAGING.FLIGHTS f ON f.flight_id = g.fid;
+  JOIN STAGING.FLIGHTS f ON f.flight_id = g.fid
+  ORDER BY g.fid;  -- write in flight_id(=date) order -> date-clustered for pruning
 
   RETURN 'FLIGHT_STATUS_EVENTS: inserted ' || :N_ROWS || ' rows';
 END;

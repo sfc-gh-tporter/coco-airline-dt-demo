@@ -31,12 +31,13 @@
 --      sql/curated/tables/route_daily_performance.sql
 --      sql/curated/tasks/refresh_route_daily_performance_task.sql   (full-recompute task)
 --
--- 5) GENERATE DATA (>=1GB/table; use a larger warehouse for speed, then resize back):
+-- 5) GENERATE DATA (~10GB total at SCALE=5; use a larger warehouse for speed, then resize back):
 --      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XLARGE';
---      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'ALL');
---      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XSMALL';
+--      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'ALL');  -- ~3.2M flights, ~470M bookings, ~344M events
+--      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'SMALL';
 --      -- populate the legacy mart once (run the task):
 --      EXECUTE TASK AIRLINE_PROD.CURATED.REFRESH_ROUTE_DAILY_PERFORMANCE_TASK;
+--    Facts are generated in flight_id(=date) order so localized incremental refreshes prune by date.
 --
 -- NOTE: The incremental dynamic table and the legacy teardown are authored LIVE during
 --       the demo (not part of baseline). They are not on main; a validated reference copy

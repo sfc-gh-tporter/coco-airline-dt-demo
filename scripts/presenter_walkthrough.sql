@@ -10,7 +10,7 @@ USE WAREHOUSE airline_demo_wh;
 -- -------------------------------------------------------------------------------------
 -- 1. Tour the existing (inefficient) pipeline
 -- -------------------------------------------------------------------------------------
--- The data: two ~1GB structured facts + one ~1GB VARIANT table, plus a small dim.
+-- The data: two large structured facts (~6GB bookings, ~5GB events) + a flights dim (~10GB total).
 SHOW TABLES IN SCHEMA airline_prod.staging;
 
 SELECT *
@@ -33,7 +33,7 @@ SELECT * FROM airline_prod.curated.route_daily_performance ORDER BY revenue_usd 
 -- Drop a tiny batch of brand-new bookings/events into staging...
 CALL airline_prod.data_gen.sp_generate_airline_data(1.0, 'LIVE');
 
--- ...then run the legacy task and watch it rescan ALL history (~2GB) just to reflect
+-- ...then run the legacy task and watch it rescan ALL history (~11GB, ~10s) just to reflect
 -- a few hundred new rows.
 --ALTER TASK airline_prod.curated.refresh_route_daily_performance_task RESUME;
 EXECUTE TASK airline_prod.curated.refresh_route_daily_performance_task;  -- run it now

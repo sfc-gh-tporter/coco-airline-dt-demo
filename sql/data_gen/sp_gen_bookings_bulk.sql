@@ -18,10 +18,10 @@ DECLARE
   max_cap  INTEGER;
   name_cnt INTEGER;
 BEGIN
-  SELECT MAX(seat_capacity) INTO :max_cap  FROM AIRLINE_PROD.STAGING.FLIGHTS;
-  SELECT COUNT(*)           INTO :name_cnt FROM AIRLINE_PROD.DATA_GEN.NAME_POOL;
+  SELECT MAX(seat_capacity) INTO :max_cap  FROM STAGING.FLIGHTS;
+  SELECT COUNT(*)           INTO :name_cnt FROM DATA_GEN.NAME_POOL;
 
-  INSERT INTO AIRLINE_PROD.STAGING.BOOKINGS
+  INSERT INTO STAGING.BOOKINGS
     (booking_id, passenger_id, passenger_name, flight_id, flight_date,
      fare_usd, seat_class, channel, booking_ts)
   WITH nums AS (
@@ -35,7 +35,7 @@ BEGIN
       f.scheduled_dep_ts,
       -- per-flight seats sold = capacity * load_target * jitter(0.65..1.00)
       ROUND(f.seat_capacity * :LOAD_TARGET * UNIFORM(0.65, 1.00, RANDOM())) AS tgt
-    FROM AIRLINE_PROD.STAGING.FLIGHTS f
+    FROM STAGING.FLIGHTS f
   ),
   base AS (
     SELECT
@@ -49,7 +49,7 @@ BEGIN
     JOIN nums n ON n.k <= e.tgt
   )
   SELECT
-    AIRLINE_PROD.DATA_GEN.BOOKING_SEQ.NEXTVAL,
+    DATA_GEN.BOOKING_SEQ.NEXTVAL,
     UNIFORM(100000, 99999999, RANDOM()),
     np.full_name,
     b.flight_id,
@@ -74,7 +74,8 @@ BEGIN
     END,
     DATEADD('day', -b.lead_days, b.scheduled_dep_ts)::TIMESTAMP_NTZ
   FROM base b
-  JOIN AIRLINE_PROD.DATA_GEN.NAME_POOL np ON np.name_id = b.nid;
+  JOIN DATA_GEN.NAME_POOL np ON np.name_id = b.nid
+  ORDER BY b.flight_id;  -- write in flight_id(=date) order -> date-clustered for pruning
 
   RETURN 'BOOKINGS_BULK: capacity-proportional load ~' || :LOAD_TARGET;
 END;

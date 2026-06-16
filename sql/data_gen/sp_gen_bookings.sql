@@ -16,10 +16,10 @@ DECLARE
   max_flight INTEGER;
   name_cnt   INTEGER;
 BEGIN
-  SELECT MAX(flight_id) INTO :max_flight FROM AIRLINE_PROD.STAGING.FLIGHTS;
-  SELECT COUNT(*)       INTO :name_cnt   FROM AIRLINE_PROD.DATA_GEN.NAME_POOL;
+  SELECT MAX(flight_id) INTO :max_flight FROM STAGING.FLIGHTS;
+  SELECT COUNT(*)       INTO :name_cnt   FROM DATA_GEN.NAME_POOL;
 
-  INSERT INTO AIRLINE_PROD.STAGING.BOOKINGS
+  INSERT INTO STAGING.BOOKINGS
     (booking_id, passenger_id, passenger_name, flight_id, flight_date,
      fare_usd, seat_class, channel, booking_ts)
   WITH g AS (
@@ -33,7 +33,7 @@ BEGIN
     FROM TABLE(GENERATOR(ROWCOUNT => :N_ROWS))
   )
   SELECT
-    AIRLINE_PROD.DATA_GEN.BOOKING_SEQ.NEXTVAL,
+    DATA_GEN.BOOKING_SEQ.NEXTVAL,
     UNIFORM(100000, 99999999, RANDOM()),
     np.full_name,
     f.flight_id,
@@ -58,8 +58,8 @@ BEGIN
     END,
     DATEADD('day', -g.lead_days, f.scheduled_dep_ts)::TIMESTAMP_NTZ
   FROM g
-  JOIN AIRLINE_PROD.STAGING.FLIGHTS   f  ON f.flight_id = g.fid
-  JOIN AIRLINE_PROD.DATA_GEN.NAME_POOL np ON np.name_id = g.nid;
+  JOIN STAGING.FLIGHTS   f  ON f.flight_id = g.fid
+  JOIN DATA_GEN.NAME_POOL np ON np.name_id = g.nid;
 
   RETURN 'BOOKINGS: inserted ' || :N_ROWS || ' rows';
 END;

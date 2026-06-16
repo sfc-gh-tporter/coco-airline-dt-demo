@@ -7,6 +7,8 @@
 --   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'LIVE');  -- tiny batch for a live run
 --
 -- SCALE multiplies SEED/BULK volumes. LIVE ignores SCALE (always a small batch).
+-- SCALE=1.0 ~= 2.2GB total; SCALE=5.0 ~= 10GB total (~3.2M flights, ~470M bookings, ~350M events).
+-- Database-relative: nested CALLs are schema-qualified so this runs in prod OR a clone.
 
 USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;
 
@@ -32,21 +34,21 @@ BEGIN
   n_events   := GREATEST(1000, (70000000 * :SCALE)::INTEGER);
 
   IF (:m = 'SEED' OR :m = 'ALL') THEN
-    CALL AIRLINE_PROD.DATA_GEN.SP_GEN_SEED(:n_names, :n_flights);
+    CALL DATA_GEN.SP_GEN_SEED(:n_names, :n_flights);
     msg := msg || 'SEED ok; ';
   END IF;
 
   IF (:m = 'BULK' OR :m = 'ALL') THEN
     -- capacity-proportional bookings (realistic load); LOAD_TARGET ~ avg load factor
-    CALL AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS_BULK(0.85);
-    CALL AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(:n_events);
+    CALL DATA_GEN.SP_GEN_BOOKINGS_BULK(0.85);
+    CALL DATA_GEN.SP_GEN_EVENTS(:n_events);
     msg := msg || 'BULK ok (capacity-proportional bookings, ' || :n_events || ' events); ';
   END IF;
 
   IF (:m = 'LIVE') THEN
     -- small batch so the legacy task + dynamic table can be watched live
-    CALL AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(400);
-    CALL AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(250);
+    CALL DATA_GEN.SP_GEN_BOOKINGS(400);
+    CALL DATA_GEN.SP_GEN_EVENTS(250);
     msg := msg || 'LIVE ok (400 bookings, 250 events); ';
   END IF;
 
