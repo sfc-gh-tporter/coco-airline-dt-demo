@@ -85,9 +85,14 @@ CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'BULK');
    ```
 3. Ask CoCo (with `/dynamic-tables`) to convert the full-refresh task into an
    **INCREMENTAL** Dynamic Table in `AIRLINE_PROD_DEV_CL` (let it derive the DDL).
-4. Validate the DDL yourself in the clone (refresh_mode = INCREMENTAL, row parity).
-5. Have CoCo commit the DT to `main` and push -> GitHub Actions deploys to prod.
-6. Have CoCo author and deploy the legacy teardown (drop the old task + target table).
+4. Validate with CoCo's `/object-parity-test` skill: prove the DT matches the legacy table
+   (schema, row counts, EXCEPT both ways, aggregates) and that it refreshes incrementally.
+5. Document with CoCo's `/change-documentation` skill: add table + column comments for
+   discoverability and draft a standardized commit message.
+6. Have CoCo commit the DT to `main` and push (plain `git push`); GitHub Actions runs on push.
+
+Note: GitHub Actions is already configured. The `snowflake-cicd-github-actions` skill is a
+one-time CI/CD *setup* tool and is NOT invoked anywhere in this demo flow (see `COCO.md`).
 
 ## 3. Reset
 

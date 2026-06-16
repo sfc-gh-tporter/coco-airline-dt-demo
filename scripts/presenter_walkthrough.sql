@@ -58,7 +58,7 @@ CREATE OR REPLACE DATABASE airline_prod_dev_cl CLONE airline_prod;
 -- 4. >>> Hand off to CoCo (paste this prompt as-is) <<<
 -- -------------------------------------------------------------------------------------
 /*
-Use the /dynamic-tables skill to modernize the pipeline in the airline_prod_dev_cl
+Use the /dynamic-tables skill to modernize the curated layer in the airline_prod_dev_cl
 database. The staging schema feeds a curated route x day KPI table
 (airline_prod_dev_cl.curated.route_daily_performance) today via a scheduled task that
  fully rebuilds the whole table on every run. Replace that full-refresh task with a
@@ -69,62 +69,32 @@ anything.
 -- -------------------------------------------------------------------------------------
 
 -- -------------------------------------------------------------------------------------
--- 5. Validate CoCo's dynamic table in the clone
+-- 5. Validate the dynamic table with the object-parity-test skill
 -- -------------------------------------------------------------------------------------
--- Discover what CoCo created and confirm refresh_mode = INCREMENTAL (not FULL):
-SHOW DYNAMIC TABLES IN SCHEMA airline_prod_dev_cl.curated;
+/*
+Use the /object-parity-test skill to validate the new
+airline_prod_dev_cl.curated.route_daily_performance_dt against the incumbent
+airline_prod_dev_cl.curated.route_daily_performance it replaces: prove they return the same
+results and that the dynamic table refreshes incrementally.
+*/
+-- CoCo will compare schemas, row counts, EXCEPT both directions, reconcile aggregates, and
+-- (in the clone) insert a small batch + refresh to confirm refresh_action = INCREMENTAL with
+-- a localized rewrite. Expect PASS on all checks.
+-- (Manual fallback queries live in skills/object-parity-test/references/test-templates.sql.)
 
 
---TEST QUERIES
---1. Row counts — should match exactly:
-SELECT
-  (SELECT COUNT(*) FROM airline_prod_dev_cl.curated.route_daily_performance)     AS legacy_rows,
-  (SELECT COUNT(*) FROM airline_prod_dev_cl.curated.route_daily_performance_dt)  AS dt_rows;
-
---2. Any differing rows in either direction (empty result = the tables are identical).
---   Each EXCEPT is parenthesized so set-operator precedence is correct.
-(
-  SELECT 'in_legacy_only' AS side, route, flight_date, seats_sold, revenue_usd,
-         seat_capacity, load_factor, avg_delay_minutes, on_time_pct
-  FROM airline_prod_dev_cl.curated.route_daily_performance
-  EXCEPT
-  SELECT 'in_legacy_only' AS side, route, flight_date, seats_sold, revenue_usd,
-         seat_capacity, load_factor, avg_delay_minutes, on_time_pct
-  FROM airline_prod_dev_cl.curated.route_daily_performance_dt
-)
-UNION ALL
-(
-  SELECT 'in_dt_only' AS side, route, flight_date, seats_sold, revenue_usd,
-         seat_capacity, load_factor, avg_delay_minutes, on_time_pct
-  FROM airline_prod_dev_cl.curated.route_daily_performance_dt
-  EXCEPT
-  SELECT 'in_dt_only' AS side, route, flight_date, seats_sold, revenue_usd,
-         seat_capacity, load_factor, avg_delay_minutes, on_time_pct
-  FROM airline_prod_dev_cl.curated.route_daily_performance
-);
-
--- Prove incremental: drop a small batch into staging, then refresh the dynamic table.
-INSERT INTO airline_prod_dev_cl.staging.bookings
-  (booking_id, passenger_id, passenger_name, flight_id, flight_date, fare_usd, seat_class, channel, booking_ts)
-SELECT airline_prod_dev_cl.data_gen.booking_seq.NEXTVAL, 1, 'Demo Passenger', f.flight_id,
-       f.scheduled_dep_ts::DATE, 250, 'ECONOMY', 'WEB', f.scheduled_dep_ts
-FROM airline_prod_dev_cl.staging.flights f LIMIT 200;
-
--- Substitute the dynamic table name CoCo chose:
-ALTER DYNAMIC TABLE airline_prod_dev_cl.curated.ROUTE_DAILY_PERFORMANCE_DT REFRESH;
--- The refresh statistics should show insertedRows ~= deletedRows with a large copiedRows
--- (only the affected route x day groups recomputed) -> incremental, not a full rebuild.
-
---Test Count val
-SELECT COUNT (*), 'route_daily_performance_dt' as table_name
- FROM airline_prod_dev_cl.curated.route_daily_performance_dt
-UNION
- SELECT COUNT (*), 'route_daily_performance'
- FROM airline_prod_dev_cl.curated.route_daily_performance;
 -- -------------------------------------------------------------------------------------
--- 6. Cutover: have CoCo commit the new dynamic table to main -> GitHub Actions deploys
---    it to PROD. Then deploy the legacy teardown to drop the old task + target table.
+-- 6. Document the change with the change-documentation skill, then commit + push
 -- -------------------------------------------------------------------------------------
+/*
+Use the /change-documentation skill to add table + column comments to
+airline_prod_dev_cl.curated.route_daily_performance_dt for discoverability, and draft a
+commit message summarizing the change and the parity-test results.
+*/
+-- Then have CoCo commit the new dynamic table to main and push. GitHub Actions is already
+-- configured and runs automatically on the push - this is a plain `git push`, NOT a CI/CD
+-- setup step (the snowflake-cicd-github-actions skill is not used anywhere in this demo).
+
 
 -- -------------------------------------------------------------------------------------
 -- 7. RESET (after the demo) - returns everything to baseline. Bulk data is preserved.
