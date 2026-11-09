@@ -44,7 +44,6 @@ jobs:
       SNOWFLAKE_ROLE: PROD_GH_ACTIONS_DEPLOY_RL
       SNOWFLAKE_WAREHOUSE: AIRLINE_DEMO_WH
       GH_TOKEN: ${{ github.token }}
-      CI_STATE: ${{ runner.temp }}/deploy_state.json
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout (history + tags for diff and rollback)

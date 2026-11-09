@@ -39,7 +39,6 @@ jobs:
       SNOWFLAKE_WAREHOUSE: AIRLINE_CI_WH
       GH_TOKEN: ${{ github.token }}
       PR: ${{ github.event.pull_request.number }}
-      CI_STATE: ${{ runner.temp }}/ci_state.json
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
