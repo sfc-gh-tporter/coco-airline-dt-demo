@@ -49,7 +49,7 @@ zero-copy; the schemas are dropped when the PR closes and a nightly sweeper remo
 | Dynamic table refresh mode | yes | `INCREMENTAL`, no fallback reason |
 | Incremental behavior | yes | localized batch (`tests/gates/incremental_batch.sql`) refreshes `INCREMENTAL`, small rewrite |
 | Parity vs incumbent | yes | `tests/parity/*.sql` (row count, EXCEPT both ways, aggregates) |
-| Docs coverage | yes | table comment + every column commented |
+| Team standards | yes | repo conventions enforced in CI; the PR comment names any gap |
 | SQL lint (sqlfluff) | advisory | reported only |
 | Cost of this run | info | queries, seconds, GB scanned on `AIRLINE_CI_WH` |
 
@@ -88,8 +88,8 @@ A validated reference copy lives on the `solution` branch as a fallback.
 1. Tour the legacy pipeline: a task fully rebuilds the KPI mart every 10 minutes.
 2. Tour the platform: OIDC identities, one secret, ruleset, `prod` environment, workflows.
 3. CoCo authors the dynamic table + a parity test on a branch and opens a PR.
-4. CI builds `AIRLINE_CI.PR_<n>_*` and runs the gates. Docs coverage fails.
-5. "The CI check failed - fix it." CoCo reads the run, documents the columns, pushes. Green.
+4. CI builds `AIRLINE_CI.PR_<n>_*`, runs the gates, and posts the results on the PR.
+5. If a check fails: "The CI check failed - fix it." CoCo reads the run, fixes it, pushes. Green.
 6. Merge. Approve the `prod` deployment in GitHub. Deploy, smoke test, `prod-last-good`.
 7. Traceability: `DEPLOY_LOG`, query tags in `QUERY_HISTORY`, PR schemas already gone.
 
