@@ -39,7 +39,7 @@ flowchart LR
 Warehouses: `AIRLINE_DEMO_WH` (SMALL, prod + sandbox), `AIRLINE_CI_WH` (XSMALL, CI).
 Only GitHub secret: `SNOWFLAKE_ACCOUNT`.
 
-### Team skills instead of a hidden instructions file
+### Team skills
 The team's conventions live in two **published skills** in the Snowflake skill catalog, visible
 to anyone with SYSADMIN, and bundled in the `Data Engineering` CoCo profile
 (`CORTEX_CODE.CONFIG.DATA_ENGINEERING`):

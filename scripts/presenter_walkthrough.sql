@@ -55,7 +55,7 @@ SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_ci;  
 SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_airline; -- environment:prod
 SHOW GRANTS TO ROLE airline_ci_rl;          -- SELECT on prod, OWNERSHIP only on AIRLINE_CI
 
--- The team's conventions are published skills, not a hidden file in the repo:
+-- The team's conventions are published skills in the Snowflake skill catalog:
 SHOW CORTEX EXTENSIONS IN SCHEMA "USER$TPORTER".skill_sharing;
 DESCRIBE AGENT cortex_code.config.data_engineering;     -- the "Data Engineering" profile
 

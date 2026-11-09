@@ -36,7 +36,6 @@ $$;
 -- 2) Drop the presenter's dev sandbox ---------------------------------------------------
 USE ROLE sysadmin;
 DROP SCHEMA IF EXISTS airline_dev.tporter;
-DROP DATABASE IF EXISTS airline_prod_dev_cl;   -- older demo versions cloned the whole database
 
 USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;
 USE WAREHOUSE airline_demo_wh;
