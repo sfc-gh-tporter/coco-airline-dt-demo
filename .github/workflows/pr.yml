@@ -1,9 +1,13 @@
 name: CI (pull request)
 
-# Every pull request gets a right-sized test environment in Snowflake:
-#   AIRLINE_CI.PR_<n>_STAGING / PR_<n>_CURATED with zero-copy clones of ONLY the objects
-#   the PR reads, changes, or affects downstream. The changed SQL is deployed there and
-#   the quality gates run against it. Results are posted as one sticky PR comment.
+# Thin, visible checks on every pull request. Each step is one check:
+#   Plan          which pipeline objects this PR changes (no Snowflake)
+#   Validate      build them in AIRLINE_CI.PR_<n>, reading prod inputs read-only;
+#                 dynamic tables are created without an initial refresh (seconds, not minutes)
+#   Refresh mode  every changed dynamic table is INCREMENTAL
+#   Documentation every changed table/view has a table comment and column comments
+#   Report        one sticky PR comment; Clean up drops the schema
+# Data parity is proven in the developer sandbox before the PR is opened.
 #
 # Auth: GitHub OIDC -> Snowflake workload identity federation. The CI identity trusts the
 # `pull_request` subject of this repo only and holds AIRLINE_CI_RL (read-only on prod).
@@ -28,33 +32,49 @@ jobs:
     # Fork PRs never get an OIDC token for this repo; skip instead of failing noisily.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_ROLE: AIRLINE_CI_RL
       SNOWFLAKE_WAREHOUSE: AIRLINE_CI_WH
       GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      CI_STATE: ${{ runner.temp }}/ci_state.json
+      PYTHONUNBUFFERED: "1"
     steps:
-      - name: Checkout (full history for the diff)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Snowflake CLI + configure OIDC
+      - name: Install Snowflake CLI (OIDC)
         uses: snowflakedb/snowflake-actions@v3
         with:
           use-oidc: true
           cli-version: "3.16"
 
-      - name: Install SQL linter (advisory gate)
-        run: pipx install sqlfluff >/dev/null 2>&1 || pip install --quiet sqlfluff || true
-
-      - name: Who am I (OIDC identity check)
+      - name: Who am I
         run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
 
-      - name: Build PR environment and run quality gates
-        run: |
-          python3 scripts/ci/ci.py pr-check \
-            --pr "${{ github.event.pull_request.number }}" \
-            --base "${{ github.event.pull_request.base.sha }}" \
-            --head "${{ github.event.pull_request.head.sha }}"
+      - name: Plan
+        run: python3 scripts/ci/ci.py pr-plan --pr "$PR" --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Validate (build in AIRLINE_CI.PR_${{ github.event.pull_request.number }})
+        run: python3 scripts/ci/ci.py pr-validate --pr "$PR"
+
+      - name: Check refresh mode
+        if: success() || failure()
+        run: python3 scripts/ci/ci.py pr-check-dt
+
+      - name: Check documentation
+        if: success() || failure()
+        run: python3 scripts/ci/ci.py pr-check-docs
+
+      - name: Report
+        if: always()
+        run: python3 scripts/ci/ci.py pr-report --pr "$PR" --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Clean up
+        if: always()
+        run: python3 scripts/ci/ci.py pr-cleanup --pr "$PR"
