@@ -41,6 +41,16 @@ that summarizes the change. Good column comments also make future semantic-view 
    `INFORMATION_SCHEMA.COLUMNS.COMMENT`.
 4. Report coverage, e.g. "table + 8/8 columns documented."
 
+**In a repo with CI** (changes ship as pull requests, e.g. `COCO.md` says so, or the object only
+exists in a PR test environment): do **not** run `ALTER`/`COMMENT ON` against live objects. Put the
+documentation in the object's SQL definition in the branch instead, so it ships with the change and
+CI can verify it:
+- Column comments in the column list:
+  `CREATE OR REPLACE DYNAMIC TABLE <obj> ( col_a COMMENT '...', col_b COMMENT '...', ... ) TARGET_LAG = ...`
+  (every output column must be listed, in SELECT order; names only, no types, for dynamic tables).
+- Object comment as a property: `COMMENT = '...'` before `AS`.
+- Commit to the same branch and push; the CI docs check re-runs on the pull request.
+
 (Optional light callout: flag obviously sensitive columns - names, emails, ids - as a note for the
 user. Do not enforce masking/classification here; that is out of scope.)
 

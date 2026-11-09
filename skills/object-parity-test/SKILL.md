@@ -65,10 +65,34 @@ Generate and run, reporting PASS/FAIL for each (see `references/test-templates.s
 
 **⚠️ Cost note:** the insert + refresh runs compute. Keep the batch small and the object in a clone.
 
+### CI parity test (when the repo has CI)
+If the repo runs parity tests in CI (look for `tests/parity/` and a CI engine such as
+`scripts/ci/ci.py`, or project conventions in `COCO.md`), do **not** run the checks yourself.
+Write them as a version-controlled test file and let CI run them in the pull request's own
+isolated test environment:
+
+- Path: `tests/parity/<candidate_object>.sql`.
+- Write object names exactly as they exist in prod (e.g. `AIRLINE_PROD.CURATED.<OBJECT>`);
+  CI rewrites them to the PR's zero-copy clones and refuses to run against prod.
+- Contract: one query whose result rows each have `CHECK_NAME` (string), `PASSED` (boolean),
+  `DETAIL` (string). Include at least row count, set equality in both directions, and
+  aggregate reconciliation over the comparable columns.
+- Read-only: SELECTs only. The incremental-behavior check is handled by CI separately.
+- Shape:
+  ```sql
+  WITH cand AS (SELECT <cols> FROM <CANDIDATE>), inc AS (SELECT <cols> FROM <INCUMBENT>), ...
+  SELECT 'row_count' AS check_name, <cond> AS passed, <text> AS detail FROM ...
+  UNION ALL SELECT 'set_equality', ..., ... FROM ...
+  UNION ALL SELECT 'aggregates', ..., ... FROM ...;
+  ```
+- Compile-check it (only_compile) against prod names before committing - never execute the
+  incremental check against prod.
+
 ### Step 6: Report
 Present a compact PASS/FAIL table: schema, row count, set-equality (both directions), aggregates,
 incremental-behavior. Note any excluded volatile columns. State an overall verdict. Optionally write
-the generated SQL to `sql/tests/<object>_parity.sql` for version control.
+the generated SQL to `sql/tests/<object>_parity.sql` for version control (or, in a repo with CI,
+the `tests/parity/` file described above).
 
 ## Stopping Points
 - ✋ Step 1: confirm candidate + incumbent before running.
