@@ -12,5 +12,8 @@ CREATE SCHEMA IF NOT EXISTS AIRLINE_PROD.CURATED
 CREATE SCHEMA IF NOT EXISTS AIRLINE_PROD.DATA_GEN
   COMMENT = 'Stored procedures that generate realistic airline data in Snowflake';
 
+CREATE SCHEMA IF NOT EXISTS AIRLINE_PROD.OPS
+  COMMENT = 'Operational metadata: production deploy audit log';
+
 -- Remove the default PUBLIC schema to keep the database tidy.
 DROP SCHEMA IF EXISTS AIRLINE_PROD.PUBLIC;

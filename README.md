@@ -1,114 +1,107 @@
-# CoCo Demo: Full-Refresh Task -> Incremental Dynamic Table (Airlines)
+# Snowflake CI/CD with Cortex Code (Airline pipeline demo)
 
-A reusable Cortex Code (CoCo) demo. It starts from a deliberately inefficient
-airline data pipeline (a scheduled task that **fully rebuilds** the KPI mart on every
-run) and uses CoCo + the `/dynamic-tables` skill to convert it into a single
-**INCREMENTAL Dynamic Table**, validated on a zero-copy clone, then deployed to
-production via **GitHub Actions** with key-pair auth.
+A reusable demo of **what good Snowflake CI/CD looks like**, with Cortex Code (CoCo) working
+inside the loop. A pipeline change (replacing a full-refresh task with an incremental dynamic
+table) goes from a feature branch, to a pull request checked in a right-sized zero-copy test
+environment, to an approval-gated, audited, self-healing production deploy. Auth is
+**GitHub OIDC end to end: no Snowflake credentials are stored in GitHub.**
 
 ---
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  dev[CoCo on a feature branch] --> pr[Pull request]
+  pr --> ci["pr.yml: OIDC as SVC_GH_ACTIONS_CI"]
+  ci --> env["AIRLINE_CI.PR_n_*: clones of only what the PR touches"]
+  env --> gates[Quality gates]
+  gates --> comment[Sticky PR comment + required ci check]
+  comment --> merge[Merge to main]
+  merge --> approve[prod environment approval]
+  approve --> deploy["deploy.yml: OIDC as SVC_GH_ACTIONS_AIRLINE"]
+  deploy --> smoke[Smoke test, rollback on failure, DEPLOY_LOG]
+  pr --> cleanup["pr_cleanup.yml: drop PR schemas + nightly sweep"]
 ```
-STAGING (~10GB total at SCALE=5, all generated in Snowflake; flight_id ordered by date)
-  FLIGHTS                (structured dim)
-  BOOKINGS               (structured fact)
-  FLIGHT_STATUS_EVENTS   (VARIANT / JSON)
-        v
-  TASK every 10 min: INSERT OVERWRITE full scan of ALL history  <-- the inefficiency
-        v
-CURATED.ROUTE_DAILY_PERFORMANCE   (route x day KPI)
 
-AFTER (CoCo writes this live):
-CURATED.ROUTE_DAILY_PERFORMANCE_DT  (INCREMENTAL Dynamic Table, TARGET_LAG=1 min)
-  -> one declarative object replaces the full-refresh task + target
-```
-
-| Object | Name |
+| Piece | Name |
 |---|---|
-| Prod database | `AIRLINE_PROD` |
-| Dev clone (created live) | `AIRLINE_PROD_DEV_CL` |
-| Schemas | `STAGING`, `CURATED`, `DATA_GEN` |
-| Warehouse | `AIRLINE_DEMO_WH` |
-| CI/CD role (owns all prod objects) | `PROD_GH_ACTIONS_DEPLOY_RL` |
-| Service user (GH Actions) | `SVC_GH_ACTIONS_AIRLINE` |
-| GitHub repo | `sfc-gh-tporter/coco-airline-dt-demo` |
+| Prod database | `AIRLINE_PROD` (`STAGING`, `CURATED`, `DATA_GEN`, `OPS`) |
+| PR test database | `AIRLINE_CI` (one schema pair per open PR, retention 0) |
+| Prod deploy identity | `SVC_GH_ACTIONS_AIRLINE` - OIDC `environment:prod` - role `PROD_GH_ACTIONS_DEPLOY_RL` |
+| PR check identity | `SVC_GH_ACTIONS_CI` - OIDC `pull_request` (+ `ref:refs/heads/main` for the sweeper) - role `AIRLINE_CI_RL` |
+| Warehouses | `AIRLINE_DEMO_WH` (SMALL, prod), `AIRLINE_CI_WH` (XSMALL, CI) |
+| Deploy audit | `AIRLINE_PROD.OPS.DEPLOY_LOG` + `QUERY_TAG = 'gh:prod:<sha>:<run>:<file>'` |
+| GitHub | public repo; `main` ruleset (PR + `ci` check); `prod` environment (required reviewer) |
+| Only GitHub secret | `SNOWFLAKE_ACCOUNT` |
+
+### Right-sized PR environments
+Real PRs are usually small (a column, a type change, one model). So a PR does **not** get a
+full copy of prod. `scripts/ci/ci.py` reads the diff and clones only the prod tables the
+change reads, plus the incumbent its parity tests compare against, and redeploys any repo
+object downstream of what changed. A docs-only PR touches nothing in Snowflake. Clones are
+zero-copy; the schemas are dropped when the PR closes and a nightly sweeper removes orphans.
+
+### Quality gates (`ci` check)
+| Gate | Blocking | Check |
+|---|---|---|
+| Deploy into PR environment | yes | changed + downstream SQL applies cleanly |
+| Dynamic table refresh mode | yes | `INCREMENTAL`, no fallback reason |
+| Incremental behavior | yes | localized batch (`tests/gates/incremental_batch.sql`) refreshes `INCREMENTAL`, small rewrite |
+| Parity vs incumbent | yes | `tests/parity/*.sql` (row count, EXCEPT both ways, aggregates) |
+| Docs coverage | yes | table comment + every column commented |
+| SQL lint (sqlfluff) | advisory | reported only |
+| Cost of this run | info | queries, seconds, GB scanned on `AIRLINE_CI_WH` |
+
+### Prod deploy
+Approval-gated (`prod` environment). Each statement is query-tagged with the commit SHA; each
+step is logged to `OPS.DEPLOY_LOG`; a smoke test verifies changed objects. On failure, new
+objects are dropped and changed objects are re-applied from the `prod-last-good` tag.
 
 ---
 
-## Repo layout (one file per object)
+## Repo layout
 
 ```
-.github/workflows/deploy.yml          GitHub Actions: JWT auth + selective deploy
+.github/workflows/
+  pr.yml             PR checks (required "ci" status)
+  pr_cleanup.yml     drop PR schemas on close + nightly orphan sweep
+  deploy.yml         approval-gated prod deploy, smoke test, rollback
 scripts/
-  deploy.sh                           Runs only changed sql/**.sql via snow sql -f
-  apply_baseline.sql                  Ordered manifest of all baseline objects
-  reset.sql                           Drop clone + DT, restore legacy baseline
-  presenter_walkthrough.sql           Step-2 live demo script
-sql/00_account/                       role, warehouse, database, schemas, service user
-sql/staging/tables/                   flights, bookings, flight_status_events
-sql/data_gen/                         Faker-seed + SQL-bulk generation sprocs
-sql/curated/tables/                   route_daily_performance (legacy target)
-sql/curated/tasks/                    refresh_route_daily_performance_task (full-refresh)
-keys/                                 RSA keypair (GITIGNORED)
-
-(The incremental dynamic table and the legacy teardown are authored LIVE during the
- demo by CoCo - they are NOT on main. A validated reference copy lives on the
- `solution` branch for the presenter only, as a cherry-pick safety net.)
+  ci/ci.py           CI engine (scope, PR env, gates, comment, deploy, rollback) - stdlib + snow CLI
+  presenter_walkthrough.sql   live demo script
+  reset.sql          Snowflake reset            reset_git.sh   GitHub reset
+  apply_baseline.sql from-scratch build order
+sql/00_account/      one-time ACCOUNTADMIN bootstrap (never deployed by CI)
+sql/staging/ sql/curated/ sql/data_gen/ sql/ops/   pipeline objects (one file per object)
+tests/gates/         CI-owned gate SQL          tests/parity/  per-change parity tests (added by PRs)
+skills/              object-parity-test, change-documentation (mirrors of the CoCo skills)
+COCO.md              conventions CoCo follows in this repo
 ```
+
+The dynamic table and its parity test are authored **live** by CoCo; they are not on `main`.
+A validated reference copy lives on the `solution` branch as a fallback.
 
 ---
 
-## 1. Pre-demo setup (already built; rebuild via reset)
+## Demo flow (details in `scripts/presenter_walkthrough.sql`)
+1. Tour the legacy pipeline: a task fully rebuilds the KPI mart every 10 minutes.
+2. Tour the platform: OIDC identities, one secret, ruleset, `prod` environment, workflows.
+3. CoCo authors the dynamic table + a parity test on a branch and opens a PR.
+4. CI builds `AIRLINE_CI.PR_<n>_*` and runs the gates. Docs coverage fails.
+5. "The CI check failed - fix it." CoCo reads the run, documents the columns, pushes. Green.
+6. Merge. Approve the `prod` deployment in GitHub. Deploy, smoke test, `prod-last-good`.
+7. Traceability: `DEPLOY_LOG`, query tags in `QUERY_HISTORY`, PR schemas already gone.
 
-Everything in `AIRLINE_PROD` is owned by `PROD_GH_ACTIONS_DEPLOY_RL` and is
-considered production. Data (~10GB total at SCALE=5; ~3.2M flights, ~470M bookings, ~344M
-events on a SMALL warehouse) is generated in Snowflake by
-`DATA_GEN.SP_GENERATE_AIRLINE_DATA(scale, mode)`. Facts are written in flight_id(=date)
-order so localized incremental refreshes can prune by date.
+You intervene at: the CoCo prompts, and the prod approval click.
 
-To rebuild from scratch run `scripts/apply_baseline.sql` then generate data:
-```sql
-CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'SEED');
-CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'BULK');
+## Reset
+```bash
+snow sql -f scripts/reset.sql -c <connection>   # PR schemas, prod DT, deploy log, legacy mart
+bash scripts/reset_git.sh                       # close PRs, delete branches, main -> baseline-v1
 ```
-
-## 2. Live demo flow (run with customer)
-
-1. Walk the existing pipeline: `scripts/presenter_walkthrough.sql`
-   (show the legacy task, run a `LIVE` batch, run the task, show the full-recompute cost).
-2. Clone production (as SYSADMIN):
-   ```sql
-   USE ROLE sysadmin;
-   CREATE OR REPLACE DATABASE AIRLINE_PROD_DEV_CL CLONE AIRLINE_PROD;
-   ```
-3. Ask CoCo (with `/dynamic-tables`) to convert the full-refresh task into an
-   **INCREMENTAL** Dynamic Table in `AIRLINE_PROD_DEV_CL` (let it derive the DDL).
-4. Validate with CoCo's `/object-parity-test` skill: prove the DT matches the legacy table
-   (schema, row counts, EXCEPT both ways, aggregates) and that it refreshes incrementally.
-5. Document with CoCo's `/change-documentation` skill: add table + column comments for
-   discoverability and draft a standardized commit message.
-6. Have CoCo commit the DT to `main` and push (plain `git push`); GitHub Actions runs on push.
+Bulk data is preserved. The schedule spans roughly -270..+90 days from generation; regenerate
+(see `scripts/apply_baseline.sql`) when "upcoming flights" run out.
 
 Note: GitHub Actions is already configured. The `snowflake-cicd-github-actions` skill is a
-one-time CI/CD *setup* tool and is NOT invoked anywhere in this demo flow (see `COCO.md`).
-
-## 3. Reset
-
-```sql
--- Snowflake side (run via CoCo or a worksheet):
-!source scripts/reset.sql   -- drops AIRLINE_PROD_DEV_CL, drops DT, restores legacy objects
-```
-```bash
-# Git side (main only; never touch the solution branch):
-git reset --hard baseline-v1 && git push --force-with-lease origin main
-```
-
-Bulk data is preserved via zero-copy clone semantics and is NOT regenerated on reset.
-
-### Git model (hybrid)
-- `main` @ tag `baseline-v1` = the "before" state shown to customers.
-- `solution` branch = proven DT + teardown commit, cherry-pick safety net if live
-  authoring stumbles: `git cherry-pick <solution-commit>`.
-- Reset only rewinds `main`; `solution` is never modified.
+one-time setup tool and is not used anywhere in this demo flow (see `COCO.md`).

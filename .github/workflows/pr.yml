@@ -1,0 +1,60 @@
+name: CI (pull request)
+
+# Every pull request gets a right-sized test environment in Snowflake:
+#   AIRLINE_CI.PR_<n>_STAGING / PR_<n>_CURATED with zero-copy clones of ONLY the objects
+#   the PR reads, changes, or affects downstream. The changed SQL is deployed there and
+#   the quality gates run against it. Results are posted as one sticky PR comment.
+#
+# Auth: GitHub OIDC -> Snowflake workload identity federation. The CI identity trusts the
+# `pull_request` subject of this repo only and holds AIRLINE_CI_RL (read-only on prod).
+# No key, password, or token is stored in GitHub - SNOWFLAKE_ACCOUNT is the only secret.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write        # mint the OIDC token Snowflake validates
+  contents: read
+  pull-requests: write   # sticky results comment
+  issues: write
+
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    # Fork PRs never get an OIDC token for this repo; skip instead of failing noisily.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_ROLE: AIRLINE_CI_RL
+      SNOWFLAKE_WAREHOUSE: AIRLINE_CI_WH
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout (full history for the diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Snowflake CLI + configure OIDC
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: "3.16"
+
+      - name: Install SQL linter (advisory gate)
+        run: pipx install sqlfluff >/dev/null 2>&1 || pip install --quiet sqlfluff || true
+
+      - name: Who am I (OIDC identity check)
+        run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
+
+      - name: Build PR environment and run quality gates
+        run: |
+          python3 scripts/ci/ci.py pr-check \
+            --pr "${{ github.event.pull_request.number }}" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"

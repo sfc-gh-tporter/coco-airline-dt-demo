@@ -3,25 +3,41 @@
 -- events as JSON, referencing random real flights. delay_minutes / status drive
 -- the avg_delay_minutes and on_time_pct KPIs downstream. Run SP_GEN_SEED first.
 --
---   CALL AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(8000000);
+-- LIVE_WINDOW_DAYS > 0 localizes events to flights departing in the next N days
+-- (see SP_GEN_BOOKINGS). 0 = any flight in the schedule (BULK).
+--
+--   CALL AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(8000000);     -- bulk
+--   CALL AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(250, 7);      -- live batch
 
 USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;
 
-CREATE OR REPLACE PROCEDURE AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(N_ROWS NUMBER)
+DROP PROCEDURE IF EXISTS AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(NUMBER);
+
+CREATE OR REPLACE PROCEDURE AIRLINE_PROD.DATA_GEN.SP_GEN_EVENTS(
+    N_ROWS NUMBER, LIVE_WINDOW_DAYS NUMBER DEFAULT 0)
   RETURNS STRING
   LANGUAGE SQL
 AS
 $$
 DECLARE
+  min_flight INTEGER;
   max_flight INTEGER;
 BEGIN
-  SELECT MAX(flight_id) INTO :max_flight FROM STAGING.FLIGHTS;
+  IF (:LIVE_WINDOW_DAYS > 0) THEN
+    SELECT MIN(flight_id), MAX(flight_id) INTO :min_flight, :max_flight
+    FROM STAGING.FLIGHTS
+    WHERE scheduled_dep_ts >= CURRENT_DATE()
+      AND scheduled_dep_ts <  DATEADD('day', :LIVE_WINDOW_DAYS, CURRENT_DATE());
+  END IF;
+  IF (:min_flight IS NULL) THEN
+    SELECT MIN(flight_id), MAX(flight_id) INTO :min_flight, :max_flight FROM STAGING.FLIGHTS;
+  END IF;
 
   INSERT INTO STAGING.FLIGHT_STATUS_EVENTS
     (event_id, flight_id, event_ts, payload)
   WITH g AS (
     SELECT
-      UNIFORM(1, :max_flight, RANDOM()) AS fid,
+      UNIFORM(:min_flight, :max_flight, RANDOM()) AS fid,
       UNIFORM(0, 100,         RANDOM()) AS st_pick,
       UNIFORM(0, 180,         RANDOM()) AS delay,
       UNIFORM(1, 35,          RANDOM()) AS gate_num,

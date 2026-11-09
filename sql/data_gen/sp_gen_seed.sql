@@ -62,7 +62,8 @@ def run(session, name_count, n_flights):
     n_air = len(AIRPORTS)
     n_ac = len(AIRCRAFT)
 
-    # Published schedule: flights span ~ -300 to +60 days around today. flight_id is
+    # Published schedule: flights span ~ -270 to +90 days around today (the +90 future
+    # window keeps "upcoming flights" available for ~3 months before a regen). flight_id is
     # assigned in scheduled_dep_ts order and rows are inserted sorted, so flight_id is
     # monotonic with date. This makes the fact tables (generated in flight_id order)
     # naturally date-clustered -> localized incremental refreshes can prune by date.
@@ -79,7 +80,7 @@ def run(session, name_count, n_flights):
         FROM (
             SELECT
                 DATEADD('minute', UNIFORM(0, 1439, RANDOM()),
-                  DATEADD('day', UNIFORM(-300, 60, RANDOM()),
+                  DATEADD('day', UNIFORM(-270, 90, RANDOM()),
                     DATE_TRUNC('day', CURRENT_TIMESTAMP())))::TIMESTAMP_NTZ AS sched,
                 UNIFORM(1, {n_air}, RANDOM()) AS o_rn,
                 UNIFORM(1, {n_air}, RANDOM()) AS d_rn,
@@ -97,5 +98,5 @@ def run(session, name_count, n_flights):
 
     flights = session.sql(f"SELECT COUNT(*) c FROM {STG}.FLIGHTS").collect()[0]["C"]
     return (f"SEED complete in {db}: {name_count} names, {n_air} airports, {n_ac} aircraft, "
-            f"{flights} flights (schedule -300..+60 days)")
+            f"{flights} flights (schedule -270..+90 days)")
 $$;

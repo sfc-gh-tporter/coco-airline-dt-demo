@@ -3,8 +3,8 @@
 --
 --   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'SEED');  -- dims + flights
 --   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'BULK');  -- ~1GB+/table facts
---   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'ALL');   -- SEED then BULK
---   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'LIVE');  -- tiny batch for a live run
+--   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'ALL');   -- full regen: truncate facts, SEED, BULK
+--   CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(1.0, 'LIVE');  -- tiny batch on next-7-day flights
 --
 -- SCALE multiplies SEED/BULK volumes. LIVE ignores SCALE (always a small batch).
 -- SCALE=1.0 ~= 2.2GB total; SCALE=5.0 ~= 10GB total (~3.2M flights, ~470M bookings, ~350M events).
@@ -33,6 +33,12 @@ BEGIN
   n_flights  := GREATEST(1000, (650000   * :SCALE)::INTEGER);
   n_events   := GREATEST(1000, (70000000 * :SCALE)::INTEGER);
 
+  IF (:m = 'ALL') THEN
+    -- A full regen rebuilds the schedule, so the facts must start empty (BULK appends).
+    TRUNCATE TABLE STAGING.BOOKINGS;
+    TRUNCATE TABLE STAGING.FLIGHT_STATUS_EVENTS;
+  END IF;
+
   IF (:m = 'SEED' OR :m = 'ALL') THEN
     CALL DATA_GEN.SP_GEN_SEED(:n_names, :n_flights);
     msg := msg || 'SEED ok; ';
@@ -46,10 +52,10 @@ BEGIN
   END IF;
 
   IF (:m = 'LIVE') THEN
-    -- small batch so the legacy task + dynamic table can be watched live
-    CALL DATA_GEN.SP_GEN_BOOKINGS(400);
-    CALL DATA_GEN.SP_GEN_EVENTS(250);
-    msg := msg || 'LIVE ok (400 bookings, 250 events); ';
+    -- small batch on flights departing in the next 7 days (a realistic booking feed)
+    CALL DATA_GEN.SP_GEN_BOOKINGS(400, 7);
+    CALL DATA_GEN.SP_GEN_EVENTS(250, 7);
+    msg := msg || 'LIVE ok (400 bookings, 250 events, next 7 days); ';
   END IF;
 
   IF (:msg = '') THEN

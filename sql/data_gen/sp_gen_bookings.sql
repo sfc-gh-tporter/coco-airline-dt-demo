@@ -1,30 +1,47 @@
 -- data_gen/sp_gen_bookings.sql
--- Bulk booking generator (pure SQL for speed). Appends N_ROWS bookings that
--- reference random real flights + Faker names. Uses BOOKING_SEQ so ids stay
--- unique across BULK and LIVE calls. Run SP_GEN_SEED first.
+-- Small-batch booking generator (pure SQL). Appends N_ROWS bookings that
+-- reference real flights + Faker names. Uses BOOKING_SEQ so ids stay unique
+-- across BULK and LIVE calls. Run SP_GEN_SEED first.
 --
---   CALL AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(30000000);
+-- LIVE_WINDOW_DAYS > 0 localizes the batch to flights departing in the next N days
+-- (flight_id is monotonic with date, so this is a contiguous id range). That is what
+-- a real booking feed looks like, and it lets incremental refreshes prune by date.
+-- 0 = any flight in the schedule.
+--
+--   CALL AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(400, 7);
 
 USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;
 
-CREATE OR REPLACE PROCEDURE AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(N_ROWS NUMBER)
+DROP PROCEDURE IF EXISTS AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(NUMBER);
+
+CREATE OR REPLACE PROCEDURE AIRLINE_PROD.DATA_GEN.SP_GEN_BOOKINGS(
+    N_ROWS NUMBER, LIVE_WINDOW_DAYS NUMBER DEFAULT 0)
   RETURNS STRING
   LANGUAGE SQL
 AS
 $$
 DECLARE
+  min_flight INTEGER;
   max_flight INTEGER;
   name_cnt   INTEGER;
 BEGIN
-  SELECT MAX(flight_id) INTO :max_flight FROM STAGING.FLIGHTS;
-  SELECT COUNT(*)       INTO :name_cnt   FROM DATA_GEN.NAME_POOL;
+  IF (:LIVE_WINDOW_DAYS > 0) THEN
+    SELECT MIN(flight_id), MAX(flight_id) INTO :min_flight, :max_flight
+    FROM STAGING.FLIGHTS
+    WHERE scheduled_dep_ts >= CURRENT_DATE()
+      AND scheduled_dep_ts <  DATEADD('day', :LIVE_WINDOW_DAYS, CURRENT_DATE());
+  END IF;
+  IF (:min_flight IS NULL) THEN
+    SELECT MIN(flight_id), MAX(flight_id) INTO :min_flight, :max_flight FROM STAGING.FLIGHTS;
+  END IF;
+  SELECT COUNT(*) INTO :name_cnt FROM DATA_GEN.NAME_POOL;
 
   INSERT INTO STAGING.BOOKINGS
     (booking_id, passenger_id, passenger_name, flight_id, flight_date,
      fare_usd, seat_class, channel, booking_ts)
   WITH g AS (
     SELECT
-      UNIFORM(1, :max_flight, RANDOM()) AS fid,
+      UNIFORM(:min_flight, :max_flight, RANDOM()) AS fid,
       UNIFORM(1, :name_cnt,   RANDOM()) AS nid,
       UNIFORM(1, 100,         RANDOM()) AS cls_pick,
       UNIFORM(1, 100,         RANDOM()) AS chan_pick,
@@ -59,7 +76,8 @@ BEGIN
     DATEADD('day', -g.lead_days, f.scheduled_dep_ts)::TIMESTAMP_NTZ
   FROM g
   JOIN STAGING.FLIGHTS   f  ON f.flight_id = g.fid
-  JOIN DATA_GEN.NAME_POOL np ON np.name_id = g.nid;
+  JOIN DATA_GEN.NAME_POOL np ON np.name_id = g.nid
+  ORDER BY f.flight_id;
 
   RETURN 'BOOKINGS: inserted ' || :N_ROWS || ' rows';
 END;

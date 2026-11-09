@@ -1,0 +1,42 @@
+-- 00_account/07_ci_environment.sql
+-- Pull-request test environment. One persistent database (AIRLINE_CI) owned by a
+-- low-privilege CI role. Each PR gets its own schemas (PR_<n>_STAGING, PR_<n>_CURATED)
+-- holding zero-copy clones of ONLY the objects that PR touches, dropped when the PR
+-- closes. The CI role can READ prod (needed to clone) but can never write to it.
+--
+-- Requires ACCOUNTADMIN. One-time bootstrap; NOT part of the CI/CD deploy.
+
+USE ROLE ACCOUNTADMIN;
+
+CREATE ROLE IF NOT EXISTS AIRLINE_CI_RL
+  COMMENT = 'GitHub Actions PR checks: owns AIRLINE_CI, read-only on AIRLINE_PROD';
+GRANT ROLE AIRLINE_CI_RL TO ROLE SYSADMIN;
+GRANT ROLE AIRLINE_CI_RL TO USER TPORTER;
+
+-- Separate, small compute so CI cost is isolated and visible.
+CREATE WAREHOUSE IF NOT EXISTS AIRLINE_CI_WH
+  WAREHOUSE_SIZE = 'XSMALL'
+  AUTO_SUSPEND = 60
+  AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE
+  COMMENT = 'Compute for pull-request checks (AIRLINE_CI)';
+GRANT USAGE, OPERATE, MONITOR ON WAREHOUSE AIRLINE_CI_WH TO ROLE AIRLINE_CI_RL;
+
+-- The CI database. No Time Travel: PR clones are throwaway, so they should not hold
+-- extra history (keeps the storage footprint of open PRs near zero).
+CREATE DATABASE IF NOT EXISTS AIRLINE_CI
+  DATA_RETENTION_TIME_IN_DAYS = 0
+  COMMENT = 'Per-PR test schemas (PR_<n>_*). Created and dropped by GitHub Actions.';
+GRANT OWNERSHIP ON DATABASE AIRLINE_CI TO ROLE AIRLINE_CI_RL COPY CURRENT GRANTS;
+DROP SCHEMA IF EXISTS AIRLINE_CI.PUBLIC;
+
+-- Read-only access to the prod objects a PR may need to clone or compare against.
+GRANT USAGE ON DATABASE AIRLINE_PROD TO ROLE AIRLINE_CI_RL;
+GRANT USAGE ON SCHEMA AIRLINE_PROD.STAGING TO ROLE AIRLINE_CI_RL;
+GRANT USAGE ON SCHEMA AIRLINE_PROD.CURATED TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON ALL TABLES          IN SCHEMA AIRLINE_PROD.STAGING TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON FUTURE TABLES       IN SCHEMA AIRLINE_PROD.STAGING TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON ALL TABLES          IN SCHEMA AIRLINE_PROD.CURATED TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON FUTURE TABLES       IN SCHEMA AIRLINE_PROD.CURATED TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON ALL DYNAMIC TABLES    IN SCHEMA AIRLINE_PROD.CURATED TO ROLE AIRLINE_CI_RL;
+GRANT SELECT ON FUTURE DYNAMIC TABLES IN SCHEMA AIRLINE_PROD.CURATED TO ROLE AIRLINE_CI_RL;
