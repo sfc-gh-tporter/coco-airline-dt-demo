@@ -87,7 +87,7 @@ def sf(sql):
     finally:
         os.unlink(path)
     if p.returncode != 0:
-        raise SqlError(_clean_error(p.stderr + p.stdout))
+        raise SqlError(_clean_error(p.stderr.strip() or p.stdout))
     out = p.stdout.strip()
     if not out:
         return []
@@ -98,9 +98,11 @@ def sf(sql):
 
 
 def _clean_error(text):
-    lines = [l.strip(" │╭╮╰╯─") for l in text.splitlines()]
-    msg = " ".join(l for l in lines if l and "Error" not in l[:7])
-    return re.sub(r"\s+", " ", msg).strip()[:1500]
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)                 # terminal colours
+    lines = [l.strip(" │╭╮╰╯─") for l in text.splitlines()]    # CLI error box
+    msg = re.sub(r"\s+", " ", " ".join(l for l in lines if l and l != "Error")).strip()
+    msg = re.sub(r"^\d{6} \([0-9A-Z]{5}\): [0-9a-f-]{36}: ", "", msg)   # code + query id
+    return msg.replace("line 0 at position -1: ", "")[:1500]
 
 
 def lit(s):
