@@ -1,44 +1,46 @@
 -- scripts/apply_baseline.sql
 -- FROM-SCRATCH rebuild manifest. The per-object files under sql/ are the source of
--- truth; run them in the order below. The new Snowflake CLI runs one file per
--- invocation, so execute each with:  snow sql -f <path> --connection prod
+-- truth; run them in the order below with:  snow sql -f <path> -c <connection>
 -- (or paste into a worksheet). CoCo can also run them directly.
 --
--- Most demos do NOT need this - use scripts/reset.sql between runs. This is only for
--- standing the whole environment up from nothing (new account, etc.).
+-- Most demos do NOT need this - use scripts/reset.sql + scripts/reset_git.sh between runs.
+-- This is only for standing the environment up from nothing (new account, etc.).
 -- =====================================================================================
 --
--- 1) ACCOUNT (run as ACCOUNTADMIN - one time):
---      sql/00_account/01_role.sql
---      sql/00_account/02_warehouse.sql
---      sql/00_account/03_database.sql
---      sql/00_account/04_schemas.sql
---      sql/00_account/05_service_user.sql        (paste the public key from keys/rsa_key.pub)
+-- 1) ACCOUNT BOOTSTRAP (ACCOUNTADMIN, one time - never deployed by CI):
+--      sql/00_account/01_role.sql                    prod deploy role
+--      sql/00_account/02_warehouse.sql               AIRLINE_DEMO_WH (SMALL)
+--      sql/00_account/03_database.sql                AIRLINE_PROD
+--      sql/00_account/04_schemas.sql                 STAGING, CURATED, DATA_GEN, OPS
+--      sql/00_account/05_service_user.sql            prod OIDC identity (environment:prod)
+--      sql/00_account/07_ci_environment.sql          AIRLINE_CI_RL, AIRLINE_CI_WH, AIRLINE_CI
+--      sql/00_account/08_ci_service_user.sql         PR-check OIDC identity (pull_request + main)
+--      sql/00_account/09_service_user_network_policy.sql   runner network policy (both users)
 --
--- 2) STAGING (role PROD_GH_ACTIONS_DEPLOY_RL):
+-- 2) PIPELINE OBJECTS (role PROD_GH_ACTIONS_DEPLOY_RL; CI deploys later changes to these):
+--      sql/ops/tables/deploy_log.sql
 --      sql/staging/tables/flights.sql
 --      sql/staging/tables/bookings.sql
 --      sql/staging/tables/flight_status_events.sql
---
--- 3) DATA GENERATION procedures:
 --      sql/data_gen/sp_gen_seed.sql
 --      sql/data_gen/sp_gen_bookings.sql
 --      sql/data_gen/sp_gen_bookings_bulk.sql
 --      sql/data_gen/sp_gen_events.sql
 --      sql/data_gen/sp_generate_airline_data.sql
---
--- 4) CURATED legacy pipeline:
 --      sql/curated/tables/route_daily_performance.sql
---      sql/curated/tasks/refresh_route_daily_performance_task.sql   (full-recompute task)
+--      sql/curated/tasks/refresh_route_daily_performance_task.sql   (legacy full-recompute task)
 --
--- 5) GENERATE DATA (~10GB total at SCALE=5; use a larger warehouse for speed, then resize back):
---      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XLARGE';
---      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'ALL');  -- ~3.2M flights, ~470M bookings, ~344M events
---      ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'SMALL';
---      -- populate the legacy mart once (run the task):
---      EXECUTE TASK AIRLINE_PROD.CURATED.REFRESH_ROUTE_DAILY_PERFORMANCE_TASK;
---    Facts are generated in flight_id(=date) order so localized incremental refreshes prune by date.
+-- 3) GENERATE DATA (~10GB at SCALE=5; schedule spans ~-270..+90 days from today):
+--      USE ROLE SYSADMIN;  ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'XLARGE';
+--      USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;  USE DATABASE AIRLINE_PROD;
+--      CALL AIRLINE_PROD.DATA_GEN.SP_GENERATE_AIRLINE_DATA(5.0, 'ALL');  -- truncates facts first
+--      USE ROLE SYSADMIN;  ALTER WAREHOUSE AIRLINE_DEMO_WH SET WAREHOUSE_SIZE = 'SMALL';
+--      then:  snow sql -f scripts/reset.sql -c <connection>               -- populates the mart
+--    Facts are written in flight_id(=date) order so localized changes prune by date.
 --
--- NOTE: The incremental dynamic table and the legacy teardown are authored LIVE during
---       the demo (not part of baseline). They are not on main; a validated reference copy
---       lives on the `solution` branch for the presenter only.
+-- 4) GITHUB (one time): public repo; secret SNOWFLAKE_ACCOUNT; environment `prod` with a
+--    required reviewer (deployment branch: main); ruleset on main requiring a pull request
+--    and the `ci` status check. Tag the baseline:  git tag -f baseline-v1 && push the tag.
+--
+-- NOTE: The incremental dynamic table and its parity test are authored LIVE during the demo
+--       (not part of baseline). A validated reference copy lives on the `solution` branch.
