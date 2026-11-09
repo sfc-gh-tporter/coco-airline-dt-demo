@@ -4,11 +4,21 @@
 
 USE ROLE PROD_GH_ACTIONS_DEPLOY_RL;
 
-CREATE OR REPLACE DYNAMIC TABLE AIRLINE_PROD.CURATED.ROUTE_DAILY_PERFORMANCE_DT
+CREATE OR REPLACE DYNAMIC TABLE AIRLINE_PROD.CURATED.ROUTE_DAILY_PERFORMANCE_DT (
+  route             COMMENT 'Origin-destination route code, e.g. JFK-LAX',
+  flight_date       COMMENT 'Scheduled departure date of the flights on this route',
+  seats_sold        COMMENT 'Bookings (seats sold) for the route on this date',
+  revenue_usd       COMMENT 'Total booked fare revenue in USD for the route on this date',
+  seat_capacity     COMMENT 'Total scheduled seat capacity on the route on this date',
+  load_factor       COMMENT 'seats_sold / seat_capacity (0-1), rounded to 4 decimals',
+  avg_delay_minutes COMMENT 'Average departure delay in minutes for the route-date',
+  on_time_pct       COMMENT 'Percent of status events with delay <= 15 minutes (0-100)'
+)
   TARGET_LAG   = '5 minutes'
   WAREHOUSE    = AIRLINE_DEMO_WH
   REFRESH_MODE = INCREMENTAL
   CLUSTER BY (flight_date)
+  COMMENT      = 'Route x day performance KPIs (bookings, capacity, load factor, delays); incremental replacement for the legacy full-refresh task'
 AS
 WITH flight_delay AS (
   SELECT e.flight_id,
