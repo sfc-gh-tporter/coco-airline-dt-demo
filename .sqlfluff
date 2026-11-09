@@ -1,8 +1,0 @@
-# SQL lint config for the advisory CI gate. Layout and capitalisation rules are off: this
-# repo's style (UPPERCASE keywords, aligned clauses) is a team choice, not a defect. What is
-# left flags things a reviewer would actually ask about (ambiguity, unused CTEs, references).
-[sqlfluff]
-dialect = snowflake
-templater = raw
-max_line_length = 120
-exclude_rules = layout, capitalisation, AL01, AL05, AL07, RF04, RF05, AM04, ST06

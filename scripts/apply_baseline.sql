@@ -14,8 +14,12 @@
 --      sql/00_account/04_schemas.sql                 STAGING, CURATED, DATA_GEN, OPS
 --      sql/00_account/05_service_user.sql            prod OIDC identity (environment:prod)
 --      sql/00_account/07_ci_environment.sql          AIRLINE_CI_RL, AIRLINE_CI_WH, AIRLINE_CI
---      sql/00_account/08_ci_service_user.sql         PR-check OIDC identity (pull_request + main)
+--      sql/00_account/08_ci_service_user.sql         PR-check OIDC identity (pull_request)
 --      sql/00_account/09_service_user_network_policy.sql   runner network policy (both users)
+--      sql/00_account/10_dev_database.sql            AIRLINE_DEV (developer sandboxes)
+--    Team skills + CoCo profile (ACCOUNTADMIN): publish skills/object-parity-test and
+--    skills/pipeline-change-shipping to the skill catalog, grant READ to SYSADMIN, and create
+--    profile CORTEX_CODE.CONFIG.DATA_ENGINEERING listing both (granted to SYSADMIN).
 --
 -- 2) PIPELINE OBJECTS (role PROD_GH_ACTIONS_DEPLOY_RL; CI deploys later changes to these):
 --      sql/ops/tables/deploy_log.sql
@@ -42,5 +46,6 @@
 --    required reviewer (deployment branch: main); ruleset on main requiring a pull request
 --    and the `ci` status check. Tag the baseline:  git tag -f baseline-v1 && push the tag.
 --
--- NOTE: The incremental dynamic table and its parity test are authored LIVE during the demo
---       (not part of baseline). A validated reference copy lives on the `solution` branch.
+-- NOTE: The incremental dynamic table is authored LIVE during the demo (in the presenter's
+--       AIRLINE_DEV sandbox, then shipped by PR). A validated reference copy lives on the
+--       `solution` branch.

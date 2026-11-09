@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""scripts/ci/ci.py - CI/CD engine for the airline pipeline (stdlib only).
+"""scripts/ci/ci.py - thin CI/CD steps for the airline pipeline (stdlib only).
 
-Every Snowflake call goes through the Snowflake CLI (`snow sql`), so there is exactly one
-auth path:
-  - GitHub Actions: `-x` temporary connection built from SNOWFLAKE_* env vars. The
-    snowflakedb/snowflake-actions@v3 step (use-oidc: true) exports the OIDC token, so
-    no key or password exists anywhere.
-  - Local runs:     set SNOWFLAKE_CONNECTION_NAME=<name> to use a named connection.
+Every Snowflake call goes through the Snowflake CLI (`snow sql`):
+  - GitHub Actions: `-x` temporary connection from SNOWFLAKE_* env vars. The
+    snowflakedb/snowflake-actions@v3 step (use-oidc: true) supplies the OIDC token.
+  - Local runs:     SNOWFLAKE_CONNECTION_NAME=<name> (plus SNOWFLAKE_ROLE / _WAREHOUSE).
 
-Commands
-  pr-check   --pr N --base SHA --head SHA   Build the PR's right-sized test environment
-                                            (AIRLINE_CI.PR_<n>_*), run the gates, post the
-                                            sticky PR comment, exit non-zero on failure.
-  pr-cleanup --pr N                         Drop the PR's schemas.
-  sweep      [--max-age-hours 24]           Drop PR schemas with no open PR / too old.
-  deploy     --before SHA --after SHA       Prod deploy: query tags, DEPLOY_LOG, smoke test,
-                                            automatic rollback, prod-last-good tag.
+Each command is one visible workflow step. Steps share results through a JSON state
+file ($CI_STATE, default ./ci_state.json).
+
+Pull request (validation only - data parity is proven in the developer sandbox):
+  pr-plan     --pr N --base SHA --head SHA   Which files/objects this PR changes (no Snowflake).
+  pr-validate --pr N                         Build the changed objects in AIRLINE_CI.PR_<n>,
+                                             reading prod inputs (read-only). Dynamic tables
+                                             are created with INITIALIZE = ON_SCHEDULE, so
+                                             nothing is computed.
+  pr-check-dt                                Changed dynamic tables are INCREMENTAL.
+  pr-check-docs                              Changed tables/views have table + column comments.
+  pr-report   --pr N --head SHA              Sticky PR comment + job summary; fails if any check did.
+  pr-cleanup  --pr N                         Drop AIRLINE_CI.PR_<n>.
+
+Prod deploy (after merge, behind the `prod` environment approval):
+  deploy      --before SHA --after SHA       Apply changed SQL (query-tagged); roll back on error.
+  smoke       [--force-failure]              Health-check deployed objects; roll back on failure.
+  record                                     DEPLOY_LOG rows; move prod-last-good when healthy.
 """
 import argparse
 import datetime as dt
@@ -30,18 +38,25 @@ PROD_DB = "AIRLINE_PROD"
 CI_DB = "AIRLINE_CI"
 CI_WH = "AIRLINE_CI_WH"
 PROD_WH = "AIRLINE_DEMO_WH"
-MIRRORED_SCHEMAS = ("STAGING", "CURATED")          # schemas a PR env mirrors
-PR_SKIP_PREFIXES = ("sql/00_account/", "sql/data_gen/", "sql/ops/")  # not part of the pipeline under test
+PR_SKIP_PREFIXES = ("sql/00_account/", "sql/data_gen/", "sql/ops/")  # not pipeline objects
 PROD_SKIP_PREFIXES = ("sql/00_account/",)          # admin bootstrap, never deployed by CI
 DEPLOY_ORDER = ["sql/ops/", "sql/staging/tables/", "sql/data_gen/", "sql/curated/tables/",
                 "sql/curated/dynamic_tables/", "sql/curated/views/", "sql/curated/tasks/"]
+DOCUMENTED_KINDS = ("TABLE", "DYNAMIC TABLE", "VIEW")
 COMMENT_MARKER = "<!-- coco-ci-report -->"
-INCREMENTAL_BATCH = "tests/gates/incremental_batch.sql"
+STATE = os.environ.get("CI_STATE", "ci_state.json")
 
 REF_RE = re.compile(r"\bAIRLINE_PROD\.(STAGING|CURATED)\.([A-Z0-9_]+)\b", re.I)
 DEF_RE = re.compile(
     r"\b(CREATE(?:\s+OR\s+REPLACE)?|ALTER)\s+(?:TRANSIENT\s+)?(DYNAMIC\s+TABLE|TABLE|VIEW|TASK)"
     r"\s+(?:IF\s+NOT\s+EXISTS\s+)?AIRLINE_PROD\.(STAGING|CURATED)\.([A-Z0-9_]+)", re.I)
+# The TARGET of a write statement is in prod (reading prod inside a CREATE ... AS is fine).
+WRITE_TO_PROD_RE = re.compile(
+    r"\b(?:CREATE(?:\s+OR\s+REPLACE)?(?:\s+[A-Z_]+)+?|ALTER(?:\s+[A-Z_]+)+?|DROP(?:\s+[A-Z_]+)+?"
+    r"|INSERT\s+(?:OVERWRITE\s+)?INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE(?:\s+[A-Z_]+)*?)"
+    r"\s+AIRLINE_PROD\.", re.I)
+
+sys.stdout.reconfigure(line_buffering=True)
 
 
 # --------------------------------------------------------------------------- snowflake
@@ -54,7 +69,6 @@ def conn_args():
     if not name:
         return ["-x"]
     args = ["-c", name]
-    # Local runs: act as the same role/warehouse the CI identity would use.
     if os.environ.get("SNOWFLAKE_ROLE"):
         args += ["--role", os.environ["SNOWFLAKE_ROLE"]]
     if os.environ.get("SNOWFLAKE_WAREHOUSE"):
@@ -62,10 +76,8 @@ def conn_args():
     return args
 
 
-def sf(sql, tag=None):
-    """Run one or more statements; return a list (one per statement) of row-dict lists."""
-    if tag:
-        sql = f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{sql}"
+def sf(sql):
+    """Run one or more statements in ONE session; return a list of row-dict lists."""
     with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as fh:
         fh.write(sql)
         path = fh.name
@@ -80,16 +92,9 @@ def sf(sql, tag=None):
     if not out:
         return []
     data = json.loads(out)
-    # single statement -> list of rows; multiple -> list of lists
     if data and isinstance(data[0], dict):
         data = [data]
     return data
-
-
-def rows(sql, tag=None):
-    """Rows of the LAST statement."""
-    res = sf(sql, tag)
-    return res[-1] if res else []
 
 
 def _clean_error(text):
@@ -102,14 +107,13 @@ def lit(s):
     return "'" + str(s).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
-# --------------------------------------------------------------------------- git / gh
+# --------------------------------------------------------------------------- git / gh / state
 def git(*a):
     return subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout
 
 
 def changed_files(base, head):
-    out = git("diff", "--name-only", f"{base}...{head}")
-    return sorted(f for f in out.splitlines() if f.strip())
+    return sorted(f for f in git("diff", "--name-only", f"{base}...{head}").splitlines() if f.strip())
 
 
 def repo_slug():
@@ -125,23 +129,42 @@ def gh_api(*a):
     return json.loads(p.stdout) if p.stdout.strip() else None
 
 
+def load_state():
+    if os.path.exists(STATE):
+        with open(STATE) as fh:
+            return json.load(fh)
+    return {}
+
+
+def save_state(st):
+    with open(STATE, "w") as fh:
+        json.dump(st, fh, indent=2)
+
+
+def summary(md):
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(md + "\n")
+
+
+def check_result(st, name, status, detail):
+    st.setdefault("checks", []).append({"name": name, "status": status, "detail": detail})
+    save_state(st)
+    print(f"{status}: {name} - {detail}")
+    return 0 if status != "FAIL" else 1
+
+
 # --------------------------------------------------------------------------- parsing
 def read(path):
     with open(path) as fh:
         return fh.read()
 
 
-def refs(text):
-    return {(s.upper(), n.upper()) for s, n in REF_RE.findall(text)}
-
-
 def definitions(text):
     """[(verb, kind, schema, name)] for objects a file creates/alters."""
-    out = []
-    for verb, kind, s, n in DEF_RE.findall(text):
-        out.append((re.sub(r"\s+", " ", verb.upper()), re.sub(r"\s+", " ", kind.upper()),
-                    s.upper(), n.upper()))
-    return out
+    return [(re.sub(r"\s+", " ", v.upper()), re.sub(r"\s+", " ", k.upper()), s.upper(), n.upper())
+            for v, k, s, n in DEF_RE.findall(text)]
 
 
 def order_key(path):
@@ -151,553 +174,379 @@ def order_key(path):
     return (len(DEPLOY_ORDER), path)
 
 
-def repo_sql_files():
-    return sorted(f for f in git("ls-files", "sql").splitlines()
-                  if f.endswith(".sql") and not f.startswith(PR_SKIP_PREFIXES))
+def strip_comments(text):
+    return re.sub(r"--[^\n]*", "", text)
 
 
-# --------------------------------------------------------------------------- PR env
-def pr_schema(pr, schema):
-    return f"PR_{pr}_{schema}"
+# --------------------------------------------------------------------------- PR steps
+def pr_schema(pr):
+    return f"{CI_DB}.PR_{pr}"
 
 
-def render_for_pr(text, pr, tag):
-    """Point SQL written for prod at the PR's schemas, on CI compute, as the CI role."""
+def render_for_pr(text, pr, defined):
+    """Build the PR's objects in AIRLINE_CI.PR_<n>; everything else is read from prod."""
     def repl(m):
-        return f"{CI_DB}.{pr_schema(pr, m.group(1).upper())}.{m.group(2)}"
+        if (m.group(1).upper(), m.group(2).upper()) in defined:
+            return f"{pr_schema(pr)}.{m.group(2)}"
+        return m.group(0)
     out = REF_RE.sub(repl, text)
     out = re.sub(r"^\s*USE\s+ROLE\s+[^;]+;\s*$", "", out, flags=re.I | re.M)
     out = re.sub(r"\bWAREHOUSE\s*=\s*" + PROD_WH + r"\b", f"WAREHOUSE = {CI_WH}", out, flags=re.I)
     out = re.sub(r"\bUSE\s+WAREHOUSE\s+" + PROD_WH + r"\b", f"USE WAREHOUSE {CI_WH}", out, flags=re.I)
-    if re.search(r"\bAIRLINE_PROD\b", re.sub(r"--[^\n]*", "", out), re.I):
-        raise SqlError("refusing to run: rendered PR SQL still references AIRLINE_PROD")
-    return f"USE WAREHOUSE {CI_WH};\nALTER SESSION SET QUERY_TAG = '{tag}';\n{out}"
+    # Validate the definition without computing it: no initial refresh in CI.
+    if re.search(r"\bDYNAMIC\s+TABLE\b", out, re.I):
+        if re.search(r"\bINITIALIZE\s*=", out, re.I):
+            out = re.sub(r"\bINITIALIZE\s*=\s*\w+", "INITIALIZE = ON_SCHEDULE", out, flags=re.I)
+        else:
+            out = re.sub(r"(\bTARGET_LAG\s*=\s*'[^']*')", r"\1\n  INITIALIZE = ON_SCHEDULE", out,
+                         count=1, flags=re.I)
+    # Guard: CI may read prod but must only ever write inside AIRLINE_CI.
+    if WRITE_TO_PROD_RE.search(strip_comments(out)):
+        raise SqlError("refusing to run: rendered SQL would write to AIRLINE_PROD")
+    return out
 
 
-def compute_scope(changed):
-    """Right-size the PR env: what to deploy, what to clone, what to test."""
-    sql_changed = [f for f in changed if f.startswith("sql/") and f.endswith(".sql")]
-    skipped = [f for f in sql_changed if f.startswith(PR_SKIP_PREFIXES)]
-    deploy = [f for f in sql_changed if f not in skipped and os.path.exists(f)]
-
-    changed_objs = set()
-    for f in deploy:
-        changed_objs |= {(s, n) for _, _, s, n in definitions(read(f))}
-
-    # Downstream: any other pipeline file that reads an object this PR changes.
-    downstream = []
-    for f in repo_sql_files():
-        if f in deploy:
-            continue
-        if refs(read(f)) & changed_objs:
-            downstream.append(f)
-    deploy_all = sorted(set(deploy) | set(downstream), key=order_key)
-
-    # Parity tests: changed ones, plus existing ones that cover a changed object.
-    tests = []
-    for f in sorted(git("ls-files", "tests/parity").splitlines()) + \
-            [f for f in changed if f.startswith("tests/parity/")]:
-        if f.endswith(".sql") and os.path.exists(f) and f not in tests:
-            if f in changed or refs(read(f)) & changed_objs:
-                tests.append(f)
-
-    replaced = set()           # CREATE OR REPLACE -> built fresh from the PR's code
-    for f in deploy_all:
-        for verb, _, s, n in definitions(read(f)):
-            if verb == "CREATE OR REPLACE":
-                replaced.add((s, n))
-    wanted = set()
-    for f in deploy_all + tests:
-        wanted |= refs(read(f))
-    return {"deploy": deploy_all, "downstream": downstream, "skipped": skipped,
-            "tests": tests, "changed_objs": changed_objs, "clone_candidates": wanted - replaced}
+def cmd_pr_plan(a):
+    files = [f for f in changed_files(a.base, a.head)
+             if f.startswith("sql/") and f.endswith(".sql") and not f.startswith(PR_SKIP_PREFIXES)
+             and os.path.exists(f)]
+    files.sort(key=order_key)
+    objects = []
+    for f in files:
+        for _, kind, s, n in definitions(read(f)):
+            objects.append({"file": f, "kind": kind, "schema": s, "name": n})
+    st = {"pr": a.pr, "files": files, "objects": objects, "checks": []}
+    save_state(st)
+    if not files:
+        print("No pipeline SQL changed - nothing to validate in Snowflake.")
+        summary("### Plan\nNo pipeline SQL changed.")
+        return 0
+    print(f"Validating {len(objects)} object(s) from {len(files)} file(s) in {pr_schema(a.pr)}:")
+    for o in objects:
+        print(f"  {o['kind'].lower():14} {o['schema']}.{o['name']}  ({o['file']})")
+    summary("### Plan\n" + "\n".join(f"- `{o['schema'].lower()}.{o['name'].lower()}` "
+                                      f"({o['kind'].lower()}) from `{o['file']}`" for o in objects))
+    return 0
 
 
-def existing_prod_tables(candidates):
-    if not candidates:
-        return set()
-    preds = " OR ".join(f"(table_schema = {lit(s)} AND table_name = {lit(n)})" for s, n in candidates)
-    r = rows(f"SELECT table_schema, table_name FROM {PROD_DB}.INFORMATION_SCHEMA.TABLES WHERE {preds}")
-    return {(x["TABLE_SCHEMA"], x["TABLE_NAME"]) for x in r}
+def cmd_pr_validate(a):
+    st = load_state()
+    if not st.get("files"):
+        return 0
+    defined = {(o["schema"], o["name"]) for o in st["objects"]}
+    tag = f"gh:pr:{a.pr}"
+    sf(f"CREATE OR REPLACE SCHEMA {pr_schema(a.pr)} "
+       f"COMMENT = 'PR #{a.pr} validation (dropped at the end of each CI run)'")
+    print(f"Created {pr_schema(a.pr)}")
+    failed = []
+    for f in st["files"]:
+        try:
+            sql = render_for_pr(read(f), a.pr, defined)
+            sf(f"USE WAREHOUSE {CI_WH};\nALTER SESSION SET QUERY_TAG = '{tag}:{f}';\n{sql}")
+            print(f"  built {f}")
+        except SqlError as e:
+            failed.append(f"`{f}`: {e}")
+            print(f"  FAILED {f}: {e}")
+    if failed:
+        return check_result(st, "Build", "FAIL", "; ".join(failed))
+    return check_result(st, "Build", "PASS",
+                        f"{len(st['files'])} file(s) built against prod inputs (read-only)")
 
 
-def drop_pr_env(pr):
-    sf(";\n".join(f"DROP SCHEMA IF EXISTS {CI_DB}.{pr_schema(pr, s)}" for s in MIRRORED_SCHEMAS))
+def cmd_pr_check_dt(a):
+    st = load_state()
+    dts = [o for o in st.get("objects", []) if o["kind"] == "DYNAMIC TABLE"]
+    if not dts:
+        return check_result(st, "Refresh mode", "SKIP", "no dynamic tables changed") if st.get("files") else 0
+    if not any(c["name"] == "Build" and c["status"] == "PASS" for c in st.get("checks", [])):
+        return check_result(st, "Refresh mode", "SKIP", "build failed")
+    res = sf(f"SHOW DYNAMIC TABLES IN SCHEMA {pr_schema(st['pr'])}")
+    wanted = {o["name"] for o in dts}
+    found = {r["name"]: r for r in (res[-1] if res else []) if r["name"] in wanted}
+    bad, good = [], []
+    for o in dts:
+        r = found.get(o["name"])
+        if not r:
+            bad.append(f"`{o['name'].lower()}` not found")
+        elif r["refresh_mode"] != "INCREMENTAL" or (r.get("refresh_mode_reason") or "").strip():
+            bad.append(f"`{o['name'].lower()}` is {r['refresh_mode']} ({r.get('refresh_mode_reason') or 'no reason'})")
+        else:
+            good.append(f"`{o['name'].lower()}` INCREMENTAL")
+    if found:   # never let a CI copy start refreshing on a schedule
+        sf(";\n".join(f"ALTER DYNAMIC TABLE {pr_schema(st['pr'])}.{n} SUSPEND" for n in found) + ";")
+    if bad:
+        return check_result(st, "Refresh mode", "FAIL", "; ".join(bad))
+    return check_result(st, "Refresh mode", "PASS", ", ".join(good))
 
 
-def build_pr_env(pr, clones, tag):
-    stmts = [f"USE WAREHOUSE {CI_WH}"]
-    for s in MIRRORED_SCHEMAS:
-        stmts.append(f"CREATE OR REPLACE SCHEMA {CI_DB}.{pr_schema(pr, s)} "
-                     f"COMMENT = 'PR #{pr} test environment (auto-dropped when the PR closes)'")
-    for s, n in sorted(clones):
-        stmts.append(f"CREATE TABLE {CI_DB}.{pr_schema(pr, s)}.{n} CLONE {PROD_DB}.{s}.{n}")
-    sf(";\n".join(stmts) + ";", tag)
-
-
-# --------------------------------------------------------------------------- gates
-class Gate:
-    def __init__(self, name, blocking=True):
-        self.name, self.blocking, self.status, self.detail = name, blocking, "SKIP", ""
-
-    def ok(self, detail=""):
-        self.status, self.detail = "PASS", detail
-
-    def fail(self, detail):
-        self.status, self.detail = "FAIL", detail
-
-    def warn(self, detail):
-        self.status, self.detail = "WARN", detail
-
-    def skip(self, detail):
-        self.status, self.detail = "SKIP", detail
-
-
-def pr_dynamic_tables(pr, objs):
-    names = {n for s, n in objs if s == "CURATED"}
-    if not names:
-        return []
-    res = sf(f"SHOW DYNAMIC TABLES IN SCHEMA {CI_DB}.{pr_schema(pr, 'CURATED')}")
-    return [r for r in (res[-1] if res else []) if r["name"] in names]
-
-
-def gate_docs(pr, objs):
-    g = Gate("Docs coverage")
+def cmd_pr_check_docs(a):
+    st = load_state()
+    objs = [o for o in st.get("objects", []) if o["kind"] in DOCUMENTED_KINDS]
     if not objs:
-        g.skip("no tables/views changed")
-        return g
-    problems, documented = [], 0
-    for s, n in sorted(objs):
-        sch = pr_schema(pr, s)
-        t = rows(f"SELECT comment FROM {CI_DB}.INFORMATION_SCHEMA.TABLES "
-                 f"WHERE table_schema = {lit(sch)} AND table_name = {lit(n)}")
-        if not t:
+        return check_result(st, "Documentation", "SKIP", "no tables or views changed") if st.get("files") else 0
+    if not any(c["name"] == "Build" and c["status"] == "PASS" for c in st.get("checks", [])):
+        return check_result(st, "Documentation", "SKIP", "build failed")
+    schema = f"PR_{st['pr']}"
+    names = ", ".join(lit(o["name"]) for o in objs)
+    rows = sf(f"SELECT t.table_name, t.comment AS table_comment, c.column_name, c.comment AS column_comment "
+              f"FROM {CI_DB}.INFORMATION_SCHEMA.TABLES t "
+              f"JOIN {CI_DB}.INFORMATION_SCHEMA.COLUMNS c "
+              f"  ON c.table_schema = t.table_schema AND c.table_name = t.table_name "
+              f"WHERE t.table_schema = {lit(schema)} AND t.table_name IN ({names}) "
+              f"ORDER BY t.table_name, c.ordinal_position")
+    rows = rows[-1] if rows else []
+    problems, documented, total = [], 0, 0
+    for o in objs:
+        mine = [r for r in rows if r["TABLE_NAME"] == o["name"]]
+        if not mine:
             continue
-        cols = rows(f"SELECT column_name, comment FROM {CI_DB}.INFORMATION_SCHEMA.COLUMNS "
-                    f"WHERE table_schema = {lit(sch)} AND table_name = {lit(n)} ORDER BY ordinal_position")
-        missing = [c["COLUMN_NAME"].lower() for c in cols if not (c["COMMENT"] or "").strip()]
-        documented += len(cols) - len(missing)
-        if not (t[0]["COMMENT"] or "").strip():
-            problems.append(f"`{n.lower()}`: no table comment")
+        missing = [r["COLUMN_NAME"].lower() for r in mine if not (r["COLUMN_COMMENT"] or "").strip()]
+        total += len(mine)
+        documented += len(mine) - len(missing)
+        if not (mine[0]["TABLE_COMMENT"] or "").strip():
+            problems.append(f"`{o['name'].lower()}`: no table comment")
         if missing:
-            problems.append(f"`{n.lower()}`: {len(missing)}/{len(cols)} columns undocumented "
+            problems.append(f"`{o['name'].lower()}`: {len(missing)}/{len(mine)} columns undocumented "
                             f"({', '.join(missing)})")
     if problems:
-        g.fail("; ".join(problems))
-    else:
-        g.ok(f"table + all {documented} columns documented")
-    return g
+        return check_result(st, "Documentation", "FAIL", "; ".join(problems))
+    return check_result(st, "Documentation", "PASS", f"table + {documented}/{total} columns documented")
 
 
-def gate_refresh_mode(dts):
-    g = Gate("Dynamic table refresh mode")
-    if not dts:
-        g.skip("no dynamic tables changed")
-        return g
-    bad = [f"`{d['name'].lower()}` is {d['refresh_mode']} ({d.get('refresh_mode_reason') or 'no reason'})"
-           for d in dts if d["refresh_mode"] != "INCREMENTAL" or (d.get("refresh_mode_reason") or "").strip()]
-    if bad:
-        g.fail("; ".join(bad))
-    else:
-        g.ok(", ".join(f"`{d['name'].lower()}` INCREMENTAL" for d in dts))
-    return g
-
-
-def gate_parity(pr, tests, tag):
-    g = Gate("Parity vs incumbent")
-    if not tests:
-        g.skip("no parity test covers the changed objects")
-        return g
-    checks, failed = [], []
-    for f in tests:
-        try:
-            for res in sf(render_for_pr(read(f), pr, tag)):
-                for r in res:
-                    if "CHECK_NAME" in r:
-                        checks.append(r)
-                        if str(r.get("PASSED")).lower() not in ("true", "1"):
-                            failed.append(f"{r['CHECK_NAME']}: {r.get('DETAIL')}")
-        except SqlError as e:
-            failed.append(f"`{f}` errored: {e}")
-    if failed:
-        g.fail("; ".join(failed))
-    elif not checks:
-        g.fail("parity tests returned no CHECK_NAME/PASSED rows")
-    else:
-        g.ok(f"{len(checks)}/{len(checks)} checks passed (" +
-             "; ".join(f"{c['CHECK_NAME']}: {c.get('DETAIL')}" for c in checks) + ")")
-    return g
-
-
-def gate_incremental(pr, dts, clones, tag):
-    g = Gate("Incremental behavior")
-    if not dts:
-        g.skip("no dynamic tables changed")
-        return g
-    if not os.path.exists(INCREMENTAL_BATCH):
-        g.skip(f"{INCREMENTAL_BATCH} not found")
-        return g
-    batch = read(INCREMENTAL_BATCH)
-    if not refs(batch) <= clones:
-        g.skip("localized batch touches tables outside this PR's scope")
-        return g
-    try:
-        sf(render_for_pr(batch, pr, tag))
-        notes, bad = [], []
-        for d in dts:
-            fq = f"{CI_DB}.{pr_schema(pr, 'CURATED')}.{d['name']}"
-            stats = rows(f"USE WAREHOUSE {CI_WH};\nALTER DYNAMIC TABLE {fq} REFRESH", tag)[0]
-            s = json.loads(stats.get("statistics") or "{}")
-            hist = rows(f"SELECT refresh_action, state FROM TABLE({CI_DB}.INFORMATION_SCHEMA."
-                        f"DYNAMIC_TABLE_REFRESH_HISTORY(NAME => {lit(fq)})) "
-                        f"WHERE refresh_trigger = 'MANUAL' ORDER BY refresh_start_time DESC LIMIT 1")
-            action = hist[0]["REFRESH_ACTION"] if hist else "UNKNOWN"
-            total = rows(f"SELECT COUNT(*) AS n FROM {fq}")[0]["N"]
-            changed = int(s.get("insertedRows", 0)) + int(s.get("deletedRows", 0))
-            notes.append(f"`{d['name'].lower()}` {action}: {s.get('insertedRows', 0)} rows rewritten "
-                         f"of {total:,}")
-            if action != "INCREMENTAL" or changed > 0.05 * max(total, 1):
-                bad.append(notes[-1])
-        if bad:
-            g.fail("; ".join(bad))
-        else:
-            g.ok("; ".join(notes))
-    except SqlError as e:
-        g.fail(str(e))
-    return g
-
-
-def gate_lint(files):
-    g = Gate("SQL lint (sqlfluff)", blocking=False)
-    if not files:
-        g.skip("no SQL changed")
-        return g
-    try:
-        p = subprocess.run(["sqlfluff", "lint", "--dialect", "snowflake", "--format", "json",
-                            "--nofail", *files], capture_output=True, text=True)
-    except FileNotFoundError:
-        g.skip("sqlfluff not installed")
-        return g
-    if p.returncode != 0 and not p.stdout.strip():
-        g.skip("sqlfluff not available")
-        return g
-    try:
-        viol = [(f["filepath"], v) for f in json.loads(p.stdout) for v in f.get("violations", [])]
-    except json.JSONDecodeError:
-        g.skip("could not parse sqlfluff output")
-        return g
-    if not viol:
-        g.ok("no findings")
-    else:
-        top = "; ".join(f"{os.path.basename(fp)}:{v.get('start_line_no', '?')} {v.get('code')}"
-                        for fp, v in viol[:5])
-        g.warn(f"{len(viol)} advisory finding(s): {top}")
-    return g
-
-
-def gate_cost(tag_prefix):
-    g = Gate("Cost of this run", blocking=False)
-    r = rows(f"SELECT COUNT(*) AS q, ROUND(SUM(total_elapsed_time)/1000, 1) AS secs, "
-             f"ROUND(SUM(bytes_scanned)/POW(1024,3), 2) AS gb "
-             f"FROM TABLE({CI_DB}.INFORMATION_SCHEMA.QUERY_HISTORY(RESULT_LIMIT => 10000)) "
-             f"WHERE query_tag LIKE {lit(tag_prefix + '%')}")
-    if r:
-        g.ok(f"{r[0]['Q']} queries, {r[0]['SECS'] or 0}s, {r[0]['GB'] or 0} GB scanned on {CI_WH}")
-    return g
-
-
-# --------------------------------------------------------------------------- report
-ICON = {"PASS": "PASS", "FAIL": "FAIL", "WARN": "WARN", "SKIP": "skip"}
-
-
-def report(pr, head, scope, clones, deploy_results, gates):
-    failed = [g for g in gates if g.blocking and g.status == "FAIL"]
+def cmd_pr_report(a):
+    st = load_state()
+    checks = st.get("checks", [])
+    if not st.get("files"):
+        checks = [{"name": "Snowflake checks", "status": "SKIP", "detail": "no pipeline SQL changed"}]
+    if st.get("files") and not checks:
+        checks = [{"name": "Build", "status": "FAIL", "detail": "validation did not run (see the job log)"}]
+    failed = [c for c in checks if c["status"] == "FAIL"]
     verdict = "FAILED" if failed else "PASSED"
-    lines = [COMMENT_MARKER, f"## CI checks {verdict} for `{head[:7]}`", ""]
-    lines.append(f"**Test environment:** `{CI_DB}.PR_{pr}_*` - {len(clones)} zero-copy clone(s) "
-                 f"of only what this PR touches, {len(scope['deploy'])} file(s) deployed. "
-                 f"Dropped automatically when the PR closes.")
+    lines = [COMMENT_MARKER, f"## CI {verdict} for `{a.head[:7]}`", ""]
+    if st.get("files"):
+        lines.append(f"Built in `{pr_schema(st['pr'])}` as the read-only CI role, reading prod inputs; "
+                     f"dynamic tables created without an initial refresh. The schema is dropped at the "
+                     f"end of every run.")
+        lines.append("")
+    lines += ["| Check | Result | Details |", "|---|---|---|"]
+    for c in checks:
+        lines.append(f"| {c['name']} | **{c['status']}** | {c['detail'].replace('|', '/')} |")
     lines.append("")
-    lines.append("| Check | Result | Details |")
-    lines.append("|---|---|---|")
-    for g in gates:
-        req = "" if g.blocking else " (advisory)"
-        lines.append(f"| {g.name}{req} | **{ICON[g.status]}** | {g.detail.replace('|', '/')} |")
-    lines.append("")
-    lines.append("<details><summary>Scope</summary>\n")
-    lines.append("- Cloned from prod: " + (", ".join(f"`{s.lower()}.{n.lower()}`" for s, n in sorted(clones)) or "none"))
-    for f, ok, msg in deploy_results:
-        lines.append(f"- Deployed `{f}`: {'ok' if ok else 'FAILED - ' + msg}")
-    for f in scope["downstream"]:
-        lines.append(f"- `{f}` redeployed because it depends on a changed object")
-    for f in scope["skipped"]:
-        lines.append(f"- `{f}` not deployed to the PR environment (admin / generator file)")
-    for f in scope["tests"]:
-        lines.append(f"- Parity test `{f}`")
-    lines.append("\n</details>")
+    lines.append("Data parity is not re-run here: it is proven in the developer sandbox before the PR "
+                 "(see the commit message).")
     if failed:
         lines.append("")
-        lines.append("Fix the failing check(s) and push to this branch; CI re-runs automatically.")
-    return "\n".join(lines), not failed
-
-
-def post_comment(pr, body):
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a") as fh:
-            fh.write(body + "\n")
-    if not os.environ.get("GITHUB_ACTIONS") and not os.environ.get("CI_POST_COMMENT"):
-        print(body)
-        return
-    slug = repo_slug()
-    existing = gh_api(f"repos/{slug}/issues/{pr}/comments", "--paginate") or []
-    mine = [c for c in existing if COMMENT_MARKER in (c.get("body") or "")]
-    if mine:
-        gh_api("-X", "PATCH", f"repos/{slug}/issues/comments/{mine[-1]['id']}", "-f", f"body={body}")
-    else:
-        gh_api("-X", "POST", f"repos/{slug}/issues/{pr}/comments", "-f", f"body={body}")
-
-
-# --------------------------------------------------------------------------- commands
-def cmd_pr_check(a):
-    pr, head = a.pr, a.head
-    tag = f"gh:pr:{pr}:{head[:12]}"
-    scope = compute_scope(changed_files(a.base, head))
-    gates, deploy_results = [], []
-    clones = set()
-
-    if not scope["deploy"] and not scope["tests"]:
-        g = Gate("Snowflake checks")
-        g.skip("no pipeline SQL or tests changed - nothing to run in Snowflake")
-        body, _ = report(pr, head, scope, clones, [], [g])
-        post_comment(pr, body)
-        return 0
-
-    clones = existing_prod_tables(scope["clone_candidates"])
-    drop_pr_env(pr)
-    build_pr_env(pr, clones, tag)
-
-    deploy_gate = Gate("Deploy into PR environment")
-    for f in scope["deploy"]:
-        try:
-            sf(render_for_pr(read(f), pr, f"{tag}:{f}"))
-            deploy_results.append((f, True, ""))
-        except SqlError as e:
-            deploy_results.append((f, False, str(e)))
-    bad = [f"`{f}`: {m}" for f, ok, m in deploy_results if not ok]
-    if bad:
-        deploy_gate.fail("; ".join(bad))
-    else:
-        deploy_gate.ok(f"{len(deploy_results)} file(s) applied")
-    gates.append(deploy_gate)
-
-    if deploy_gate.status == "PASS":
-        dts = pr_dynamic_tables(pr, scope["changed_objs"])
-        gates.append(gate_refresh_mode(dts))
-        gates.append(gate_parity(pr, scope["tests"], tag))     # before the batch mutates inputs
-        gates.append(gate_incremental(pr, dts, clones, tag))
-        gates.append(gate_docs(pr, scope["changed_objs"]))
-        for d in dts:   # stop CI dynamic tables from refreshing until the PR env is dropped
-            sf(f"ALTER DYNAMIC TABLE {CI_DB}.{pr_schema(pr, 'CURATED')}.{d['name']} SUSPEND")
-    gates.append(gate_lint([f for f in scope["deploy"] if os.path.exists(f)]))
-    gates.append(gate_cost(tag))
-
-    body, ok = report(pr, head, scope, clones, deploy_results, gates)
-    post_comment(pr, body)
-    return 0 if ok else 1
+        lines.append("Fix the failing check and push to this branch; CI re-runs automatically.")
+    body = "\n".join(lines)
+    summary(body)
+    print(body)
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI_POST_COMMENT"):
+        slug = repo_slug()
+        existing = gh_api(f"repos/{slug}/issues/{a.pr}/comments", "--paginate") or []
+        mine = [c for c in existing if COMMENT_MARKER in (c.get("body") or "")]
+        if mine:
+            gh_api("-X", "PATCH", f"repos/{slug}/issues/comments/{mine[-1]['id']}", "-f", f"body={body}")
+        else:
+            gh_api("-X", "POST", f"repos/{slug}/issues/{a.pr}/comments", "-f", f"body={body}")
+    return 1 if failed else 0
 
 
 def cmd_pr_cleanup(a):
-    drop_pr_env(a.pr)
-    print(f"Dropped {CI_DB}.PR_{a.pr}_* schemas")
+    sf(f"DROP SCHEMA IF EXISTS {pr_schema(a.pr)}")
+    print(f"Dropped {pr_schema(a.pr)}")
     return 0
 
 
-def cmd_sweep(a):
-    open_prs = {str(p["number"]) for p in
-                gh_api(f"repos/{repo_slug()}/pulls?state=open&per_page=100") or []}
-    res = rows(f"SHOW SCHEMAS LIKE 'PR\\\\_%' IN DATABASE {CI_DB}")
-    now = dt.datetime.now(dt.timezone.utc)
-    dropped = []
-    for r in res:
-        m = re.match(r"PR_(\d+)_", r["name"])
-        if not m:
-            continue
-        created = dt.datetime.fromisoformat(str(r["created_on"]).replace("Z", "+00:00"))
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=dt.timezone.utc)
-        age_h = (now - created).total_seconds() / 3600
-        if m.group(1) not in open_prs or age_h > a.max_age_hours:
-            sf(f"DROP SCHEMA IF EXISTS {CI_DB}.{r['name']}")
-            dropped.append(f"{r['name']} (PR open: {m.group(1) in open_prs}, age {age_h:.1f}h)")
-    print("Swept: " + (", ".join(dropped) if dropped else "nothing to drop"))
-    return 0
-
-
-# ---- prod deploy
-def log_rows(entries):
-    if not entries:
-        return
-    vals = ",\n".join(
-        "(" + ", ".join(lit(e[k]) for k in ("deploy_id", "git_sha", "actor", "file_path", "action",
-                                              "status", "query_tag", "message")) +
-        f", {lit(e['started_at'])}::TIMESTAMP_LTZ, {lit(e['finished_at'])}::TIMESTAMP_LTZ)"
-        for e in entries)
-    sf(f"INSERT INTO {PROD_DB}.OPS.DEPLOY_LOG (deploy_id, git_sha, actor, file_path, action, status, "
-       f"query_tag, message, started_at, finished_at) VALUES\n{vals}")
-
-
+# --------------------------------------------------------------------------- prod deploy
 def now_iso():
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def smoke_test(objs, force_fail=False):
-    """Return a list of failure strings (empty = healthy)."""
-    fails = []
-    for s, n in sorted(objs):
-        t = rows(f"SELECT table_type, row_count FROM {PROD_DB}.INFORMATION_SCHEMA.TABLES "
-                 f"WHERE table_schema = {lit(s)} AND table_name = {lit(n)}")
-        if not t:
-            fails.append(f"{s}.{n} does not exist")
-            continue
-        if s == "CURATED" and not (t[0]["ROW_COUNT"] or 0) > 0:
-            fails.append(f"{s}.{n} has no rows")
-        dts = rows(f"SHOW DYNAMIC TABLES LIKE {lit(n)} IN SCHEMA {PROD_DB}.{s}")
-        if dts:
-            d = dts[0]
-            if d["refresh_mode"] != "INCREMENTAL":
-                fails.append(f"{n} refresh_mode is {d['refresh_mode']}")
-            h = rows(f"SELECT state FROM TABLE({PROD_DB}.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY("
-                     f"NAME => {lit(PROD_DB + '.' + s + '.' + n)})) ORDER BY refresh_start_time DESC LIMIT 1")
-            if h and h[0]["STATE"] not in ("SUCCEEDED", "EXECUTING", "SCHEDULED"):
-                fails.append(f"{n} last refresh {h[0]['STATE']}")
-    if force_fail:
-        fails.append("rollback drill: smoke failure forced by workflow input")
-    return fails
+def run_id():
+    return f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
 
 
-def update_last_good(sha):
-    slug = repo_slug()
-    try:
-        gh_api("-X", "PATCH", f"repos/{slug}/git/refs/tags/prod-last-good", "-f", f"sha={sha}", "-F", "force=true")
-    except RuntimeError:
-        gh_api("-X", "POST", f"repos/{slug}/git/refs", "-f", "ref=refs/tags/prod-last-good", "-f", f"sha={sha}")
+def log_entry(st, file_path, action, status, tag, message, start):
+    st.setdefault("log", []).append(dict(
+        deploy_id=run_id(), git_sha=st["sha"], actor=st["actor"], file_path=file_path, action=action,
+        status=status, query_tag=tag, message=message[:3900], started_at=start, finished_at=now_iso()))
+    save_state(st)
+
+
+def existing_prod_objects(objs):
+    if not objs:
+        return set()
+    preds = " OR ".join(f"(table_schema = {lit(s)} AND table_name = {lit(n)})" for s, n in objs)
+    res = sf(f"SELECT table_schema, table_name FROM {PROD_DB}.INFORMATION_SCHEMA.TABLES WHERE {preds}")
+    return {(r["TABLE_SCHEMA"], r["TABLE_NAME"]) for r in (res[-1] if res else [])}
 
 
 def cmd_deploy(a):
-    run_id = f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
-    actor = os.environ.get("GITHUB_ACTOR", os.environ.get("USER", "local"))
     sha = a.after
-    zero = "0" * 40
-    if a.before and a.before != zero:
+    if a.before and a.before != "0" * 40:
         files = changed_files(a.before, sha)
     else:
-        files = sorted(git("ls-files", "sql").splitlines())
+        files = git("ls-files", "sql").splitlines()
     files = sorted((f for f in files if f.endswith(".sql") and f.startswith("sql/")
                     and not f.startswith(PROD_SKIP_PREFIXES) and os.path.exists(f)), key=order_key)
-    print(f"[DEPLOY prod] {len(files)} file(s) for {sha[:7]}: {files}")
+    objs = sorted({(s, n) for f in files for _, _, s, n in definitions(read(f))})
+    kinds = {(s, n): k for f in files for _, k, s, n in definitions(read(f))}
+    st = {"sha": sha, "actor": os.environ.get("GITHUB_ACTOR", os.environ.get("USER", "local")),
+          "files": files, "objects": [list(o) for o in objs],
+          "kinds": {f"{s}.{n}": k for (s, n), k in kinds.items()},
+          "pre_existing": [list(o) for o in existing_prod_objects(objs)], "applied": [], "log": []}
+    save_state(st)
+    print(f"Deploying {len(files)} file(s) at {sha[:7]}")
     if not files:
+        st["status"] = "NOTHING"
+        save_state(st)
         print("No deployable SQL changes.")
         return 0
-
-    objs = {(s, n) for f in files for _, _, s, n in definitions(read(f))}
-    pre_existing = existing_prod_tables(objs)
-    log, applied, failure = [], [], None
     for f in files:
-        tag = f"gh:prod:{sha[:12]}:{run_id}:{f}"
+        tag = f"gh:prod:{sha[:12]}:{run_id()}:{f}"
         start = now_iso()
         try:
             sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{read(f)}")
-            applied.append(f)
-            log.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path=f, action="DEPLOY",
-                            status="SUCCESS", query_tag=tag, message="", started_at=start, finished_at=now_iso()))
-            print(f"  applied {f}")
+            st["applied"].append(f)
+            log_entry(st, f, "DEPLOY", "SUCCESS", tag, "", start)
+            print(f"  applied {f}  (query tag {tag})")
         except SqlError as e:
-            failure = f"{f}: {e}"
-            log.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path=f, action="DEPLOY",
-                            status="FAILED", query_tag=tag, message=str(e), started_at=start, finished_at=now_iso()))
+            log_entry(st, f, "DEPLOY", "FAILED", tag, str(e), start)
             print(f"  FAILED {f}: {e}")
-            break
-
-    if not failure:
-        start = now_iso()
-        fails = smoke_test(objs, force_fail=a.force_smoke_failure)
-        log.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path="(all changed objects)",
-                        action="SMOKE_TEST", status="FAILED" if fails else "SUCCESS",
-                        query_tag=f"gh:prod:{sha[:12]}:{run_id}:smoke", message="; ".join(fails)[:3900],
-                        started_at=start, finished_at=now_iso()))
-        print("  smoke: " + ("; ".join(fails) if fails else "healthy"))
-        if fails:
-            failure = "smoke test: " + "; ".join(fails)
-
-    if failure:
-        log += rollback(objs, pre_existing, applied, run_id, sha, actor)
-        log_rows(log)
-        print(f"[DEPLOY prod] FAILED and rolled back: {failure}")
-        return 1
-
-    log_rows(log)
-    if os.environ.get("GITHUB_ACTIONS"):
-        update_last_good(sha)
-    print(f"[DEPLOY prod] SUCCESS ({len(applied)} file(s)); prod-last-good -> {sha[:7]}")
+            rollback(st)
+            st["status"] = "ROLLED_BACK"
+            save_state(st)
+            return 1
+    st["status"] = "DEPLOYED"
+    save_state(st)
     return 0
 
 
-def rollback(objs, pre_existing, applied, run_id, sha, actor):
+def cmd_smoke(a):
+    st = load_state()
+    if st.get("status") != "DEPLOYED":
+        print(f"Skipped (deploy status: {st.get('status', 'unknown')})")
+        return 0
+    fails, start = [], now_iso()
+    for s, n in st["objects"]:
+        t = sf(f"SELECT table_type, row_count FROM {PROD_DB}.INFORMATION_SCHEMA.TABLES "
+               f"WHERE table_schema = {lit(s)} AND table_name = {lit(n)}")
+        t = t[-1] if t else []
+        if not t:
+            fails.append(f"{s}.{n} does not exist")
+            continue
+        ok = f"{s}.{n} exists"
+        if s == "CURATED":
+            if not (t[0]["ROW_COUNT"] or 0) > 0:
+                fails.append(f"{s}.{n} has no rows")
+            else:
+                ok += f", {t[0]['ROW_COUNT']:,} rows"
+        if st["kinds"].get(f"{s}.{n}") == "DYNAMIC TABLE":
+            d = sf(f"SHOW DYNAMIC TABLES LIKE {lit(n)} IN SCHEMA {PROD_DB}.{s}")
+            d = d[-1] if d else []
+            if d and d[0]["refresh_mode"] != "INCREMENTAL":
+                fails.append(f"{n} refresh_mode is {d[0]['refresh_mode']}")
+            elif d:
+                ok += ", INCREMENTAL"
+        print(f"  {ok}")
+    if a.force_failure:
+        fails.append("rollback drill: smoke failure forced by workflow input")
+    tag = f"gh:prod:{st['sha'][:12]}:{run_id()}:smoke"
+    log_entry(st, "(all changed objects)", "SMOKE_TEST", "FAILED" if fails else "SUCCESS", tag,
+              "; ".join(fails), start)
+    if fails:
+        print("Smoke test FAILED: " + "; ".join(fails))
+        rollback(st)
+        st["status"] = "ROLLED_BACK"
+        save_state(st)
+        return 1
+    st["status"] = "HEALTHY"
+    save_state(st)
+    print("Smoke test passed")
+    return 0
+
+
+def rollback(st):
     """New objects are dropped; changed objects are re-applied from the prod-last-good tag."""
-    entries = []
-    tag = f"gh:prod:{sha[:12]}:{run_id}:rollback"
-    kinds = {}
-    for f in applied:
-        for _, kind, s, n in definitions(read(f)):
-            kinds[(s, n)] = kind
-    for s, n in sorted(objs - pre_existing):
+    tag = f"gh:prod:{st['sha'][:12]}:{run_id()}:rollback"
+    pre = {tuple(o) for o in st["pre_existing"]}
+    for s, n in st["objects"]:
+        if (s, n) in pre:
+            continue
+        kind = st["kinds"].get(f"{s}.{n}", "TABLE")
         start = now_iso()
-        kind = kinds.get((s, n), "TABLE")
         try:
-            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\nUSE ROLE PROD_GH_ACTIONS_DEPLOY_RL;\n"
-               f"DROP {kind} IF EXISTS {PROD_DB}.{s}.{n}")
-            entries.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path=f"{s}.{n}",
-                                action="ROLLBACK", status="SUCCESS", query_tag=tag,
-                                message=f"dropped new {kind.lower()}", started_at=start, finished_at=now_iso()))
+            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\nDROP {kind} IF EXISTS {PROD_DB}.{s}.{n}")
+            log_entry(st, f"{s}.{n}", "ROLLBACK", "SUCCESS", tag, f"dropped new {kind.lower()}", start)
             print(f"  rollback: dropped new {kind.lower()} {s}.{n}")
         except SqlError as e:
-            entries.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path=f"{s}.{n}",
-                                action="ROLLBACK", status="FAILED", query_tag=tag, message=str(e),
-                                started_at=start, finished_at=now_iso()))
-    for f in applied:
-        if not ({(s, n) for _, _, s, n in definitions(read(f))} & pre_existing):
+            log_entry(st, f"{s}.{n}", "ROLLBACK", "FAILED", tag, str(e), start)
+    for f in st["applied"]:
+        if not ({(s, n) for _, _, s, n in definitions(read(f))} & pre):
             continue
         start = now_iso()
         try:
-            old = git("show", f"prod-last-good:{f}")
-            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{old}")
+            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{git('show', f'prod-last-good:{f}')}")
             status, msg = "SUCCESS", "re-applied from prod-last-good"
         except (subprocess.CalledProcessError, SqlError) as e:
             status, msg = "FAILED", f"could not restore from prod-last-good: {e}"
-        entries.append(dict(deploy_id=run_id, git_sha=sha, actor=actor, file_path=f, action="ROLLBACK",
-                            status=status, query_tag=tag, message=msg, started_at=start, finished_at=now_iso()))
+        log_entry(st, f, "ROLLBACK", status, tag, msg, start)
         print(f"  rollback: {f}: {msg}")
-    return entries
+
+
+def cmd_record(a):
+    st = load_state()
+    if not st.get("log"):
+        print("Nothing to record.")
+        return 0
+    vals = ",\n".join(
+        "(" + ", ".join(lit(e[k]) for k in ("deploy_id", "git_sha", "actor", "file_path", "action",
+                                              "status", "query_tag", "message")) +
+        f", {lit(e['started_at'])}::TIMESTAMP_LTZ, {lit(e['finished_at'])}::TIMESTAMP_LTZ)"
+        for e in st["log"])
+    sf(f"INSERT INTO {PROD_DB}.OPS.DEPLOY_LOG (deploy_id, git_sha, actor, file_path, action, status, "
+       f"query_tag, message, started_at, finished_at) VALUES\n{vals}")
+    print(f"Wrote {len(st['log'])} row(s) to {PROD_DB}.OPS.DEPLOY_LOG (deploy_id {run_id()})")
+    md = ["| File / object | Action | Status |", "|---|---|---|"] + \
+         [f"| `{e['file_path']}` | {e['action']} | {e['status']} |" for e in st["log"]]
+    summary("### Deploy log\n" + "\n".join(md))
+    if st.get("status") == "HEALTHY" and os.environ.get("GITHUB_ACTIONS"):
+        slug = repo_slug()
+        try:
+            gh_api("-X", "PATCH", f"repos/{slug}/git/refs/tags/prod-last-good", "-f", f"sha={st['sha']}",
+                   "-F", "force=true")
+        except RuntimeError:
+            gh_api("-X", "POST", f"repos/{slug}/git/refs", "-f", "ref=refs/tags/prod-last-good",
+                   "-f", f"sha={st['sha']}")
+        print(f"prod-last-good -> {st['sha'][:7]}")
+    return 0 if st.get("status") in ("HEALTHY", "NOTHING") else 1
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("pr-check"); p.add_argument("--pr", required=True)
+    p = sub.add_parser("pr-plan"); p.add_argument("--pr", required=True)
     p.add_argument("--base", required=True); p.add_argument("--head", required=True)
+    p = sub.add_parser("pr-validate"); p.add_argument("--pr", required=True)
+    sub.add_parser("pr-check-dt")
+    sub.add_parser("pr-check-docs")
+    p = sub.add_parser("pr-report"); p.add_argument("--pr", required=True); p.add_argument("--head", default="HEAD")
     p = sub.add_parser("pr-cleanup"); p.add_argument("--pr", required=True)
-    p = sub.add_parser("sweep"); p.add_argument("--max-age-hours", type=float, default=24)
-    p = sub.add_parser("deploy"); p.add_argument("--before", default="")
-    p.add_argument("--after", default="HEAD")
-    p.add_argument("--force-smoke-failure", action="store_true",
-                   help="rollback drill: fail the smoke test on purpose")
+    p = sub.add_parser("deploy"); p.add_argument("--before", default=""); p.add_argument("--after", default="HEAD")
+    p = sub.add_parser("smoke"); p.add_argument("--force-failure", action="store_true")
+    sub.add_parser("record")
     a = ap.parse_args()
     for attr in ("after", "head"):
         if getattr(a, attr, None) == "HEAD":
             setattr(a, attr, git("rev-parse", "HEAD").strip())
-    return {"pr-check": cmd_pr_check, "pr-cleanup": cmd_pr_cleanup,
-            "sweep": cmd_sweep, "deploy": cmd_deploy}[a.cmd](a)
+    try:
+        return {"pr-plan": cmd_pr_plan, "pr-validate": cmd_pr_validate, "pr-check-dt": cmd_pr_check_dt,
+                "pr-check-docs": cmd_pr_check_docs, "pr-report": cmd_pr_report,
+                "pr-cleanup": cmd_pr_cleanup, "deploy": cmd_deploy, "smoke": cmd_smoke,
+                "record": cmd_record}[a.cmd](a)
+    except SqlError as e:
+        print(f"Snowflake error: {e}")
+        return 1
 
 
 if __name__ == "__main__":

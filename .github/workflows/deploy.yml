@@ -3,10 +3,11 @@ name: Deploy (prod)
 # Production deploy after a PR merges to main.
 #   - Gate:      the `prod` GitHub environment requires a reviewer approval before this job
 #                can even request its OIDC token (the prod identity trusts environment:prod).
-#   - Traceable: every statement carries QUERY_TAG 'gh:prod:<sha>:<run>:<file>' and one row
-#                per step lands in AIRLINE_PROD.OPS.DEPLOY_LOG.
-#   - Safe:      a post-deploy smoke test; on failure new objects are dropped, changed objects
-#                are re-applied from the `prod-last-good` tag, and the job fails red.
+#   - Deploy:    apply the changed SQL; every statement carries QUERY_TAG
+#                'gh:prod:<sha>:<run>:<file>'.
+#   - Smoke:     health-check the deployed objects. On failure, new objects are dropped,
+#                changed objects are re-applied from the `prod-last-good` tag, and the job fails.
+#   - Record:    one row per step in AIRLINE_PROD.OPS.DEPLOY_LOG; move prod-last-good.
 # Auth: OIDC only. SNOWFLAKE_ACCOUNT is the only secret.
 
 on:
@@ -37,30 +38,37 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: prod
+    timeout-minutes: 30
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_ROLE: PROD_GH_ACTIONS_DEPLOY_RL
       SNOWFLAKE_WAREHOUSE: AIRLINE_DEMO_WH
       GH_TOKEN: ${{ github.token }}
+      PYTHONUNBUFFERED: "1"
     steps:
-      - name: Checkout (full history + tags for diff and rollback)
+      - name: Checkout (history + tags for diff and rollback)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Snowflake CLI + configure OIDC
+      - name: Install Snowflake CLI (OIDC)
         uses: snowflakedb/snowflake-actions@v3
         with:
           use-oidc: true
           cli-version: "3.16"
 
-      - name: Who am I (OIDC identity check)
+      - name: Who am I
         run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
 
-      - name: Deploy changed SQL, smoke test, roll back on failure
+      - name: Deploy
         run: |
           BEFORE="${{ github.event_name == 'push' && github.event.before || inputs.before }}"
-          FLAGS=""
-          if [ "${{ inputs.force_smoke_failure }}" = "true" ]; then FLAGS="--force-smoke-failure"; fi
-          python3 scripts/ci/ci.py deploy --before "$BEFORE" --after "${{ github.sha }}" $FLAGS
+          python3 scripts/ci/ci.py deploy --before "$BEFORE" --after "${{ github.sha }}"
+
+      - name: Smoke test
+        run: python3 scripts/ci/ci.py smoke ${{ inputs.force_smoke_failure && '--force-failure' || '' }}
+
+      - name: Record
+        if: always()
+        run: python3 scripts/ci/ci.py record

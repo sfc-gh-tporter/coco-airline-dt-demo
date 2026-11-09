@@ -1,6 +1,6 @@
 ---
 name: object-parity-test
-description: "Prove that a refactored or replacement object returns the SAME results as the incumbent object it replaces, and (for dynamic tables) that it refreshes incrementally. Use when: validating a rewrite/migration, comparing two tables/views/dynamic tables for equivalence, regression-testing a refactor, confirming a dynamic table is genuinely incremental, or before swapping a new object in for an old one. Triggers: parity test, equivalence check, validate the rewrite, validate the refactor, do the results match, compare new vs old object, regression test this change, prove the dynamic table matches the legacy table, confirm incremental refresh. This skill ONLY validates result equivalence and incremental behavior - it does NOT deploy, push, or configure any infrastructure."
+description: "Prove that a refactored or replacement object returns the SAME results as the incumbent object it replaces, and (for dynamic tables) that it refreshes incrementally. Runs in a developer sandbox schema of zero-copy clones, never in prod. Use when: validating a rewrite/migration, comparing two tables/views/dynamic tables for equivalence, regression-testing a refactor, confirming a dynamic table is genuinely incremental, or before swapping a new object in for an old one. Triggers: parity test, equivalence check, validate the rewrite, validate the refactor, do the results match, compare new vs old object, regression test this change, prove the dynamic table matches the legacy table, confirm incremental refresh. This skill ONLY validates result equivalence and incremental behavior - it does NOT deploy, push, or configure any infrastructure."
 ---
 
 # Object Parity Test
@@ -9,96 +9,79 @@ Generate and run SQL that proves a **candidate** object (the new/refactored one)
 equivalent to the **incumbent** object it replaces, then report a structured PASS/FAIL. For dynamic
 tables, also prove the refresh is genuinely incremental.
 
+## Where it runs: the developer sandbox
+Our team develops in a personal sandbox schema, `<DEV_DB>.<DEV_SCHEMA>` (for example
+`AIRLINE_DEV.<your_user>`), that holds **zero-copy clones** of the prod tables the change reads
+and the incumbent it replaces. The candidate is built in that same schema on top of the clones.
+
+- Both objects being compared live in the sandbox. Never run these checks against prod objects.
+- The incremental check **writes test rows** into the sandbox clones. That is safe (clones are
+  copy-on-write; prod is untouched) and it is the only place this skill ever writes.
+- If the sandbox or a clone is missing, stop and tell the user what to create; do not create
+  clones of prod yourself unless asked.
+
 ## When to Use
 - An object was refactored or replaced (e.g. a full-refresh table replaced by an incremental dynamic
   table, a dbt model rewritten, a view swapped for a table) and you need to prove equivalence before
-  trusting/swapping it.
-- You want to confirm a dynamic table refreshes incrementally (only changed partitions), not fully.
+  shipping it.
+- You want to confirm a dynamic table refreshes incrementally (only changed groups), not fully.
 
-## When NOT to Use / Not to Be Confused With
-- This skill does **not** deploy, push to git, or set up GitHub Actions / CI/CD / service accounts /
-  secrets. For provisioning GitHub Actions deployment, that is a different, separate skill
-  (`snowflake-cicd-github-actions`) and is unrelated to this validation step.
-- Run this against a **dev/clone** object. It writes test rows into base tables, so never point the
-  incremental-behavior check at production.
+## When NOT to Use
+- This skill does **not** deploy, commit, push, or set up CI/CD. Packaging the change for a pull
+  request is the `pipeline-change-shipping` skill.
 
 ## Workflow
 
 ### Step 1: Identify the two objects
-**Goal:** know what is being compared.
+Infer (or ask for) the fully-qualified names, both in the sandbox:
+- **CANDIDATE** - the new object, e.g. `<DEV_DB>.<DEV_SCHEMA>.<NEW_OBJECT>`
+- **INCUMBENT** - the clone of the object it replaces, e.g. `<DEV_DB>.<DEV_SCHEMA>.<OLD_OBJECT>`
 
-Ask (or infer from context) the fully-qualified names of:
-- **CANDIDATE** - the new object (e.g. `<db>.CURATED.ROUTE_DAILY_PERFORMANCE_DT`)
-- **INCUMBENT** - the object it replaces (e.g. `<db>.CURATED.ROUTE_DAILY_PERFORMANCE`)
-
-Confirm both exist and which database they live in (prefer a dev clone for the incremental check).
+Confirm both exist. Confirm the incumbent clone is in sync with the base clones (it was cloned
+at the same time as the inputs); if it is not, say so before comparing.
 
 **Stopping point:** confirm the two objects before generating tests.
 
 ### Step 2: Schema comparison
-`DESCRIBE` both objects. Compare column names, types, and order. Report any differences. If the
-candidate intentionally drops/renames columns, note it and continue with the **comparable** column set.
+`DESCRIBE` both objects. Compare column names, types, and order. Report differences. If the
+candidate intentionally drops/renames columns, note it and continue with the **comparable** set.
 
 ### Step 3: Detect volatile columns
-Equivalence fails on columns whose values are non-deterministic per run - e.g. load/audit timestamps
-(`*_ts`, `last_*`, `loaded_at`), `CURRENT_TIMESTAMP()`/`CURRENT_DATE`-derived columns, sequence/surrogate
-ids. Identify these and **exclude them from the row-equality test** (or normalize/truncate them), and
-say which were excluded and why. This is expected and correct - call it out rather than letting it
-cause false failures.
+Equivalence fails on columns whose values are non-deterministic per run - load/audit timestamps
+(`*_ts`, `last_*`, `loaded_at`), `CURRENT_TIMESTAMP()`/`CURRENT_DATE`-derived columns, surrogate
+ids. Exclude them from the row-equality test (or normalize them) and say which were excluded and why.
 
-### Step 4: Equivalence checks (over comparable, non-volatile columns)
-Generate and run, reporting PASS/FAIL for each (see `references/test-templates.sql` for templates):
+### Step 4: Equivalence checks (comparable, non-volatile columns)
+Run and report PASS/FAIL for each (templates in `references/test-templates.sql`):
 1. **Row count** - counts match.
-2. **Set equality** - `(candidate EXCEPT incumbent)` AND `(incumbent EXCEPT candidate)` both return 0
-   rows. Parenthesize each EXCEPT so set-operator precedence is correct.
-3. **Aggregate reconciliation** - SUM/AVG/MIN/MAX of key numeric measures match within a small
-   tolerance (floating-point/rounding safe).
+2. **Set equality** - `(candidate EXCEPT incumbent)` and `(incumbent EXCEPT candidate)` both return
+   0 rows. Parenthesize each EXCEPT so set-operator precedence is correct.
+3. **Aggregate reconciliation** - SUM of key numeric measures match within a small tolerance.
 
 ### Step 5: Incremental-behavior check (only if CANDIDATE is a dynamic table)
-**Goal:** prove the refresh is incremental, not a hidden full recompute.
-1. `SHOW DYNAMIC TABLES LIKE '<candidate>'` -> confirm `refresh_mode = INCREMENTAL` (no fallback reason).
-2. Insert a **small, localized** batch into the relevant base table **in the dev clone**.
-3. `ALTER DYNAMIC TABLE <candidate> REFRESH;`
-4. Read `INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY` (join `QUERY_HISTORY` on `query_id` for
-   bytes) -> assert `refresh_action = INCREMENTAL` and rows rewritten << total table rows (the change
-   stayed localized). Report rows-rewritten vs total and (if available) bytes scanned.
+1. `SHOW DYNAMIC TABLES LIKE '<candidate>' IN SCHEMA <DEV_DB>.<DEV_SCHEMA>` -> confirm
+   `refresh_mode = INCREMENTAL` and no `refresh_mode_reason`.
+2. Insert a **small, localized** batch into the sandbox clone(s) of the base table(s) - shaped like
+   a real feed (a few hundred rows on near-term dates), see the template.
+3. `ALTER DYNAMIC TABLE <candidate> REFRESH;` and keep its `statistics` output.
+4. Read `INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY` for the candidate -> assert the latest
+   manual refresh has `refresh_action = INCREMENTAL` and rows rewritten << total rows.
+   Report rows rewritten vs total. Report elapsed time honestly; do not claim a speedup you did
+   not measure.
 
-**⚠️ Cost note:** the insert + refresh runs compute. Keep the batch small and the object in a clone.
-
-### CI parity test (when the repo has CI)
-If the repo runs parity tests in CI (look for `tests/parity/` and a CI engine such as
-`scripts/ci/ci.py`, or project conventions in `COCO.md`), do **not** run the checks yourself.
-Write them as a version-controlled test file and let CI run them in the pull request's own
-isolated test environment:
-
-- Path: `tests/parity/<candidate_object>.sql`.
-- Write object names exactly as they exist in prod (e.g. `AIRLINE_PROD.CURATED.<OBJECT>`);
-  CI rewrites them to the PR's zero-copy clones and refuses to run against prod.
-- Contract: one query whose result rows each have `CHECK_NAME` (string), `PASSED` (boolean),
-  `DETAIL` (string). Include at least row count, set equality in both directions, and
-  aggregate reconciliation over the comparable columns.
-- Read-only: SELECTs only. The incremental-behavior check is handled by CI separately.
-- Shape:
-  ```sql
-  WITH cand AS (SELECT <cols> FROM <CANDIDATE>), inc AS (SELECT <cols> FROM <INCUMBENT>), ...
-  SELECT 'row_count' AS check_name, <cond> AS passed, <text> AS detail FROM ...
-  UNION ALL SELECT 'set_equality', ..., ... FROM ...
-  UNION ALL SELECT 'aggregates', ..., ... FROM ...;
-  ```
-- Compile-check it (only_compile) against prod names before committing - never execute the
-  incremental check against prod.
+**Cost note:** keep the batch small; it runs on the session warehouse.
 
 ### Step 6: Report
-Present a compact PASS/FAIL table: schema, row count, set-equality (both directions), aggregates,
-incremental-behavior. Note any excluded volatile columns. State an overall verdict. Optionally write
-the generated SQL to `sql/tests/<object>_parity.sql` for version control (or, in a repo with CI,
-the `tests/parity/` file described above).
+A compact PASS/FAIL table: schema, row count, set equality (both directions), aggregates,
+refresh mode, incremental behavior (rows rewritten / total). Note excluded volatile columns and
+any sandbox caveats (e.g. the incumbent no longer matches after the test batch, which is expected).
+State an overall verdict and a one-line summary the user can paste into a commit message.
 
 ## Stopping Points
-- ✋ Step 1: confirm candidate + incumbent before running.
-- ✋ Step 5: before inserting test rows (confirm it is a clone, not prod).
-- ✋ Step 6: present results; do not act on them (no swap/drop) without user direction.
+- Step 1: confirm candidate + incumbent before running.
+- Step 5: before inserting test rows, state the exact sandbox tables being written to.
+- Step 6: present results; do not swap, drop, deploy, or commit anything.
 
 ## Output
-A PASS/FAIL parity report (equivalence + incremental behavior), the generated test SQL, and a clear
+A PASS/FAIL parity report (equivalence + incremental behavior), the SQL that was run, and a clear
 verdict on whether the candidate can safely replace the incumbent.

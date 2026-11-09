@@ -1,8 +1,8 @@
 -- 00_account/07_ci_environment.sql
 -- Pull-request test environment. One persistent database (AIRLINE_CI) owned by a
--- low-privilege CI role. Each PR gets its own schemas (PR_<n>_STAGING, PR_<n>_CURATED)
--- holding zero-copy clones of ONLY the objects that PR touches, dropped when the PR
--- closes. The CI role can READ prod (needed to clone) but can never write to it.
+-- low-privilege CI role. Each CI run builds the PR's changed objects in schema PR_<n>,
+-- reading prod inputs read-only (no clones), and drops the schema at the end of the
+-- run. The CI role can READ prod but can never write to it.
 --
 -- Requires ACCOUNTADMIN. One-time bootstrap; NOT part of the CI/CD deploy.
 
@@ -26,7 +26,7 @@ GRANT USAGE, OPERATE, MONITOR ON WAREHOUSE AIRLINE_CI_WH TO ROLE AIRLINE_CI_RL;
 -- extra history (keeps the storage footprint of open PRs near zero).
 CREATE DATABASE IF NOT EXISTS AIRLINE_CI
   DATA_RETENTION_TIME_IN_DAYS = 0
-  COMMENT = 'Per-PR test schemas (PR_<n>_*). Created and dropped by GitHub Actions.';
+  COMMENT = 'Per-PR validation schemas (PR_<n>). Created and dropped by each GitHub Actions run.';
 GRANT OWNERSHIP ON DATABASE AIRLINE_CI TO ROLE AIRLINE_CI_RL COPY CURRENT GRANTS;
 DROP SCHEMA IF EXISTS AIRLINE_CI.PUBLIC;
 

@@ -1,18 +1,16 @@
 -- scripts/presenter_walkthrough.sql
--- Live demo script: "What good Snowflake CI/CD looks like - with CoCo in the loop."
--- Run section by section. This file is a presenter aid; it is NOT deployed by CI.
--- Style: SQL keywords UPPERCASE, object names lowercase.
+-- Live demo script: "Develop in a sandbox, ship through a pull request, deploy behind an approval."
+-- Run section by section in a Snowsight worksheet (or the Workspace). Presenter aid only;
+-- NOT deployed by CI. Style: SQL keywords UPPERCASE, object names lowercase.
 --
--- The story
---   A pipeline change goes from a feature branch -> pull request -> automated checks in
---   Snowflake (a right-sized, zero-copy test environment per PR) -> approval-gated prod
---   deploy with audit trail, smoke test, and automatic rollback. Auth is OIDC end to end:
---   there are no Snowflake credentials stored in GitHub. CoCo writes the change, opens the
---   PR, and fixes what CI flags - it never touches prod directly.
+-- On screen: Snowsight (Workspace git-synced to this repo + the CoCo side panel) and GitHub.
+-- CoCo profile: "Data Engineering" (side panel -> Agent settings -> Profiles).
 --
 -- Where you intervene
---   - Section 4/6/7: paste the CoCo prompts.
---   - Section 7: click "Review deployments -> Approve" in GitHub (the prod gate).
+--   - Section 3: create your sandbox (paste the block).
+--   - Sections 4-6: paste the CoCo prompts.
+--   - Section 6: create a branch, commit and push in the Workspace; open the PR in GitHub.
+--   - Section 7: merge. Section 8: "Review deployments -> Approve" (the prod gate).
 -- =====================================================================================
 
 USE ROLE sysadmin;
@@ -21,10 +19,11 @@ USE WAREHOUSE airline_demo_wh;
 -- -------------------------------------------------------------------------------------
 -- 0. Pre-flight (before the audience joins)
 -- -------------------------------------------------------------------------------------
--- Baseline: no PR schemas, no dynamic table, legacy mart populated, task suspended.
-SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- expect none
-SHOW DYNAMIC TABLES IN SCHEMA airline_prod.curated;                        -- expect none
+SHOW SCHEMAS IN DATABASE airline_dev;                                      -- only INFORMATION_SCHEMA
+SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- none
+SHOW DYNAMIC TABLES IN SCHEMA airline_prod.curated;                        -- none
 SELECT COUNT(*) AS mart_rows FROM airline_prod.curated.route_daily_performance;
+-- Workspace: on branch main, pulled. CoCo side panel: profile "Data Engineering" applied.
 
 -- -------------------------------------------------------------------------------------
 -- 1. The pipeline we are about to change
@@ -32,7 +31,6 @@ SELECT COUNT(*) AS mart_rows FROM airline_prod.curated.route_daily_performance;
 -- ~10GB generated in Snowflake: two large facts + a flights dimension.
 SHOW TABLES IN SCHEMA airline_prod.staging;
 SELECT * FROM airline_prod.staging.bookings LIMIT 100;
-SELECT * FROM airline_prod.staging.flight_status_events LIMIT 100;
 
 -- Today a scheduled task FULLY rebuilds the route x day KPI mart every 10 minutes.
 SELECT GET_DDL('TASK', 'airline_prod.curated.refresh_route_daily_performance_task');
@@ -40,105 +38,108 @@ SELECT * FROM airline_prod.curated.route_daily_performance ORDER BY revenue_usd 
 
 -- New bookings arrive (a small batch on flights departing in the next 7 days)...
 CALL airline_prod.data_gen.sp_generate_airline_data(1.0, 'LIVE');
--- ...and the legacy task rescans all history to reflect them. Wait for it to finish
--- (the PR's parity test compares against this mart, so it must be current).
+-- ...and the legacy task rescans all history to reflect them. Wait until it SUCCEEDS
+-- (your sandbox clones the mart next, and parity compares against it).
 EXECUTE TASK airline_prod.curated.refresh_route_daily_performance_task;
 SELECT state, scheduled_time, completed_time
 FROM TABLE(airline_prod.information_schema.task_history(
        TASK_NAME => 'REFRESH_ROUTE_DAILY_PERFORMANCE_TASK', RESULT_LIMIT => 1));
-SELECT ROUND(total_elapsed_time/1000,1) AS secs, ROUND(bytes_scanned/POW(1024,3),2) AS gb_scanned,
-       rows_produced
-FROM TABLE(airline_prod.information_schema.query_history(RESULT_LIMIT => 50))
-WHERE query_text ILIKE 'insert overwrite into airline_prod.curated%'
-ORDER BY start_time DESC LIMIT 1;
 
 -- -------------------------------------------------------------------------------------
--- 2. The CI/CD platform (tour it before using it)
+-- 2. The platform: three environments, two OIDC identities, published team skills
 -- -------------------------------------------------------------------------------------
--- Two service identities, both OIDC (workload identity federation). No password, no key.
---   SVC_GH_ACTIONS_CI      trusts GitHub "pull_request" jobs    -> role AIRLINE_CI_RL (read-only on prod)
---   SVC_GH_ACTIONS_AIRLINE trusts GitHub "environment:prod"     -> role PROD_GH_ACTIONS_DEPLOY_RL
-SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_ci;
-SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_airline;
-SHOW GRANTS TO ROLE airline_ci_rl;          -- note: SELECT on prod, OWNERSHIP only on AIRLINE_CI
+--   AIRLINE_DEV.<you>    your sandbox (you, by hand)
+--   AIRLINE_CI.PR_<n>    CI builds the PR's objects here, then drops the schema
+--   AIRLINE_PROD         deployed only by the approved prod workflow
+SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_ci;      -- pull_request
+SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER svc_gh_actions_airline; -- environment:prod
+SHOW GRANTS TO ROLE airline_ci_rl;          -- SELECT on prod, OWNERSHIP only on AIRLINE_CI
 
--- In GitHub (show in the browser):
---   Settings -> Secrets: only SNOWFLAKE_ACCOUNT.
---   Settings -> Environments -> prod: required reviewer.
---   Settings -> Rules: main requires a pull request + the "ci" check.
---   .github/workflows/: pr.yml (checks), pr_cleanup.yml (hygiene), deploy.yml (prod).
+-- The team's conventions are published skills, not a hidden file in the repo:
+SHOW CORTEX EXTENSIONS IN SCHEMA "USER$TPORTER".skill_sharing;
+DESCRIBE AGENT cortex_code.config.data_engineering;     -- the "Data Engineering" profile
 
--- -------------------------------------------------------------------------------------
--- 3. The PR test environment design (talk track)
--- -------------------------------------------------------------------------------------
--- Every PR gets schemas AIRLINE_CI.PR_<n>_STAGING / PR_<n>_CURATED containing zero-copy
--- clones of ONLY what that PR reads, changes, or affects downstream. A docs-only PR touches
--- nothing in Snowflake; a column change clones one table and its dependents. Schemas are
--- dropped when the PR closes, and a nightly sweeper removes anything orphaned.
+-- In GitHub (browser): Settings -> Secrets: only SNOWFLAKE_ACCOUNT. Environments -> prod:
+-- required reviewer. Rules: main requires a PR + the "ci" check. Workflows: pr.yml, deploy.yml.
 
 -- -------------------------------------------------------------------------------------
--- 4. >>> Hand off to CoCo: author the change and open a PR <<<
+-- 3. Create your sandbox (zero-copy: seconds, no extra storage until rows change)
+-- -------------------------------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS airline_dev.tporter;
+CREATE OR REPLACE TABLE airline_dev.tporter.bookings                CLONE airline_prod.staging.bookings;
+CREATE OR REPLACE TABLE airline_dev.tporter.flights                 CLONE airline_prod.staging.flights;
+CREATE OR REPLACE TABLE airline_dev.tporter.flight_status_events    CLONE airline_prod.staging.flight_status_events;
+CREATE OR REPLACE TABLE airline_dev.tporter.route_daily_performance CLONE airline_prod.curated.route_daily_performance;
+SHOW TABLES IN SCHEMA airline_dev.tporter;
+
+-- -------------------------------------------------------------------------------------
+-- 4. >>> CoCo prompt A: build the change in the sandbox <<<
 -- -------------------------------------------------------------------------------------
 /*
-Replace the full-refresh task that feeds airline_prod.curated.route_daily_performance with a
-single INCREMENTAL dynamic table, airline_prod.curated.route_daily_performance_dt, that
-produces the same KPI columns. Use the /dynamic-tables skill to design it and the
-/object-parity-test skill to add a CI parity test proving it matches the legacy table.
-Don't create anything in Snowflake yourself - follow COCO.md: put the change on a branch and
-open a pull request so CI can build and test it.
+In my sandbox airline_dev.tporter (zero-copy clones of the prod staging tables and the legacy
+KPI mart), build an INCREMENTAL dynamic table airline_dev.tporter.route_daily_performance_dt
+that produces the same columns as the legacy table route_daily_performance. The legacy logic
+is in the task airline_prod.curated.refresh_route_daily_performance_task. Read only from the
+sandbox tables, and use warehouse airline_demo_wh with a 5 minute target lag.
 */
+SHOW DYNAMIC TABLES IN SCHEMA airline_dev.tporter;      -- refresh_mode INCREMENTAL
 
 -- -------------------------------------------------------------------------------------
--- 5. Watch CI (GitHub PR page)
--- -------------------------------------------------------------------------------------
--- The "ci" check runs in a few minutes and posts a results comment. While it runs:
-SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- the PR's schemas appear
--- Walk the PR comment row by row. If a check fails, the PR cannot merge while "ci" is red
--- (expected outcomes are in the presenter runbook, kept outside the repo).
-
--- -------------------------------------------------------------------------------------
--- 6. >>> CoCo fixes the failing check <<<
+-- 5. >>> CoCo prompt B: prove it <<<
 -- -------------------------------------------------------------------------------------
 /*
-The CI check on my pull request failed. Find out why and fix it.
+Use the object-parity-test skill to compare airline_dev.tporter.route_daily_performance_dt
+with airline_dev.tporter.route_daily_performance.
 */
--- CoCo reads the PR comment / run log, fixes the cause on the same branch, and pushes.
--- CI re-runs and turns green.
+-- CoCo reports row count, set equality both ways, aggregates, refresh mode, and an
+-- incremental refresh after a small batch into the sandbox clones (prod is untouched).
 
 -- -------------------------------------------------------------------------------------
--- 7. Merge -> approval-gated prod deploy
+-- 6. >>> Branch, then CoCo prompt C: package it for a pull request <<<
 -- -------------------------------------------------------------------------------------
+-- Workspace: create branch feat/route-daily-performance-dt.
 /*
-CI is green - merge the pull request.
+Use the pipeline-change-shipping skill to package this dynamic table for a pull request.
 */
--- In GitHub: Actions -> "Deploy (prod)" is WAITING for approval.
--- >>> Click "Review deployments" -> prod -> "Approve and deploy". <<<
--- The job deploys, smoke-tests, and moves the prod-last-good tag. On a failed smoke test it
--- rolls back automatically.
+-- CoCo writes sql/curated/dynamic_tables/route_daily_performance_dt.sql (prod names, comments
+-- in the definition) and drafts the commit message.
+-- Workspace: commit with that message, push. GitHub: open the pull request.
 
 -- -------------------------------------------------------------------------------------
--- 8. Traceability: who changed prod, with what, and was it healthy?
+-- 7. Watch CI (GitHub -> PR -> Checks -> ci): each step is one check, about a minute
+-- -------------------------------------------------------------------------------------
+-- Plan -> Validate -> Check refresh mode -> Check documentation -> Report -> Clean up.
+-- While Validate runs:
+SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- PR_<n> appears, then goes
+-- Read the PR comment. Merge the pull request.
+
+-- -------------------------------------------------------------------------------------
+-- 8. Approval-gated prod deploy
+-- -------------------------------------------------------------------------------------
+-- GitHub: Actions -> "Deploy (prod)" is WAITING.
+-- >>> "Review deployments" -> prod -> "Approve and deploy". <<<
+-- Steps: Deploy -> Smoke test -> Record. (The DT's initial build runs in Deploy.)
+
+-- -------------------------------------------------------------------------------------
+-- 9. Traceability: who changed prod, with what, and was it healthy?
 -- -------------------------------------------------------------------------------------
 USE ROLE prod_gh_actions_deploy_rl;
 SELECT action, status, file_path, git_sha, actor, query_tag, started_at
 FROM airline_prod.ops.deploy_log ORDER BY started_at;
 
--- Every prod statement carries the commit SHA in its query tag:
 SELECT query_tag, query_type, ROUND(total_elapsed_time/1000,1) AS secs, user_name, role_name
 FROM TABLE(airline_prod.information_schema.query_history_by_user(
        USER_NAME => 'SVC_GH_ACTIONS_AIRLINE', RESULT_LIMIT => 100))
 WHERE query_tag LIKE 'gh:prod:%' ORDER BY start_time;
 
 SHOW DYNAMIC TABLES IN SCHEMA airline_prod.curated;                        -- INCREMENTAL, in prod
-USE ROLE sysadmin;
-SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- gone: dropped on merge
 
 -- Optional rollback drill: Actions -> "Deploy (prod)" -> Run workflow ->
---   before = HEAD~1, force_smoke_failure = true. Watch the smoke test fail and the
---   rollback restore prod; both appear in DEPLOY_LOG.
+--   before = HEAD~1, force_smoke_failure = true. The smoke test fails, the rollback restores
+--   prod, and both appear in DEPLOY_LOG.
 
 -- -------------------------------------------------------------------------------------
--- 9. RESET (after the demo). Bulk data is preserved.
+-- 10. RESET (after the demo). Bulk data is preserved.
 -- -------------------------------------------------------------------------------------
 --   snow sql -f scripts/reset.sql -c <connection>    -- Snowflake side
 --   bash scripts/reset_git.sh                        -- GitHub side (PRs, branches, main, tags)

@@ -16,3 +16,6 @@ __pycache__/
 
 # CoCo internal plan/cache (keep out of demo repo history)
 .snowflake/cortex/
+
+# CI step state
+ci_state.json
