@@ -93,8 +93,8 @@ open a pull request so CI can build and test it.
 -- -------------------------------------------------------------------------------------
 -- The "ci" check runs in a few minutes and posts a results comment. While it runs:
 SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- the PR's schemas appear
--- Expect: deploy, refresh mode, parity, and incremental checks PASS; Docs coverage FAILS
--- (the new table has no column comments). The PR cannot merge while "ci" is red.
+-- Walk the PR comment row by row. If a check fails, the PR cannot merge while "ci" is red
+-- (expected outcomes are in the presenter runbook, kept outside the repo).
 
 -- -------------------------------------------------------------------------------------
 -- 6. >>> CoCo fixes the failing check <<<
@@ -102,8 +102,8 @@ SHOW SCHEMAS LIKE 'PR\\_%' IN DATABASE airline_ci;                         -- th
 /*
 The CI check on my pull request failed. Find out why and fix it.
 */
--- CoCo reads the PR comment / run log, uses /change-documentation to add table + column
--- comments, and pushes to the same branch. CI re-runs and turns green.
+-- CoCo reads the PR comment / run log, fixes the cause on the same branch, and pushes.
+-- CI re-runs and turns green.
 
 -- -------------------------------------------------------------------------------------
 -- 7. Merge -> approval-gated prod deploy
