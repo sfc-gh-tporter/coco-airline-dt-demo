@@ -169,7 +169,7 @@ def render_for_pr(text, pr, tag):
     out = re.sub(r"^\s*USE\s+ROLE\s+[^;]+;\s*$", "", out, flags=re.I | re.M)
     out = re.sub(r"\bWAREHOUSE\s*=\s*" + PROD_WH + r"\b", f"WAREHOUSE = {CI_WH}", out, flags=re.I)
     out = re.sub(r"\bUSE\s+WAREHOUSE\s+" + PROD_WH + r"\b", f"USE WAREHOUSE {CI_WH}", out, flags=re.I)
-    if re.search(r"\bAIRLINE_PROD\b", out, re.I):
+    if re.search(r"\bAIRLINE_PROD\b", re.sub(r"--[^\n]*", "", out), re.I):
         raise SqlError("refusing to run: rendered PR SQL still references AIRLINE_PROD")
     return f"USE WAREHOUSE {CI_WH};\nALTER SESSION SET QUERY_TAG = '{tag}';\n{out}"
 
@@ -372,8 +372,12 @@ def gate_lint(files):
     if not files:
         g.skip("no SQL changed")
         return g
-    p = subprocess.run(["sqlfluff", "lint", "--dialect", "snowflake", "--format", "json",
-                        "--nofail", *files], capture_output=True, text=True)
+    try:
+        p = subprocess.run(["sqlfluff", "lint", "--dialect", "snowflake", "--format", "json",
+                            "--nofail", *files], capture_output=True, text=True)
+    except FileNotFoundError:
+        g.skip("sqlfluff not installed")
+        return g
     if p.returncode != 0 and not p.stdout.strip():
         g.skip("sqlfluff not available")
         return g
@@ -689,8 +693,9 @@ def main():
     p.add_argument("--force-smoke-failure", action="store_true",
                    help="rollback drill: fail the smoke test on purpose")
     a = ap.parse_args()
-    if getattr(a, "after", None) == "HEAD":
-        a.after = git("rev-parse", "HEAD").strip()
+    for attr in ("after", "head"):
+        if getattr(a, attr, None) == "HEAD":
+            setattr(a, attr, git("rev-parse", "HEAD").strip())
     return {"pr-check": cmd_pr_check, "pr-cleanup": cmd_pr_cleanup,
             "sweep": cmd_sweep, "deploy": cmd_deploy}[a.cmd](a)
 

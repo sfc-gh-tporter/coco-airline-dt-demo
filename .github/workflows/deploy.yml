@@ -1,61 +1,66 @@
-name: Deploy Airline Pipeline
+name: Deploy (prod)
+
+# Production deploy after a PR merges to main.
+#   - Gate:      the `prod` GitHub environment requires a reviewer approval before this job
+#                can even request its OIDC token (the prod identity trusts environment:prod).
+#   - Traceable: every statement carries QUERY_TAG 'gh:prod:<sha>:<run>:<file>' and one row
+#                per step lands in AIRLINE_PROD.OPS.DEPLOY_LOG.
+#   - Safe:      a post-deploy smoke test; on failure new objects are dropped, changed objects
+#                are re-applied from the `prod-last-good` tag, and the job fails red.
+# Auth: OIDC only. SNOWFLAKE_ACCOUNT is the only secret.
 
 on:
   push:
     branches: [main]
     paths:
-      - 'sql/**'
+      - "sql/**"
   workflow_dispatch:
+    inputs:
+      before:
+        description: "Deploy files changed since this ref (default: prod-last-good)"
+        required: false
+        default: "prod-last-good"
+      force_smoke_failure:
+        description: "Rollback drill: fail the smoke test on purpose"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: write   # move the prod-last-good tag after a healthy deploy
 
 concurrency:
-  group: deploy-airline-pipeline
+  group: deploy-prod
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: prod
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_ROLE: PROD_GH_ACTIONS_DEPLOY_RL
+      SNOWFLAKE_WAREHOUSE: AIRLINE_DEMO_WH
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout (full history for diff)
+      - name: Checkout (full history + tags for diff and rollback)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install Snowflake CLI + configure OIDC
+        uses: snowflakedb/snowflake-actions@v3
         with:
-          python-version: '3.11'
+          use-oidc: true
+          cli-version: "3.16"
 
-      - name: Install Snowflake CLI
-        run: pip install --quiet snowflake-cli-labs
+      - name: Who am I (OIDC identity check)
+        run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
 
-      - name: Configure Snowflake connection (key-pair JWT)
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      - name: Deploy changed SQL, smoke test, roll back on failure
         run: |
-          mkdir -p "$HOME/.snowflake"
-          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$HOME/.snowflake/rsa_key.p8"
-          chmod 600 "$HOME/.snowflake/rsa_key.p8"
-          cat > "$HOME/.snowflake/config.toml" <<EOF
-          default_connection_name = "prod"
-
-          [connections.prod]
-          account = "$SNOWFLAKE_ACCOUNT"
-          user = "$SNOWFLAKE_USER"
-          authenticator = "SNOWFLAKE_JWT"
-          private_key_path = "$HOME/.snowflake/rsa_key.p8"
-          role = "$SNOWFLAKE_ROLE"
-          warehouse = "$SNOWFLAKE_WAREHOUSE"
-          database = "$SNOWFLAKE_DATABASE"
-          EOF
-          chmod 600 "$HOME/.snowflake/config.toml"
-
-      - name: Test connection
-        run: snow connection test --connection prod
-
-      - name: Deploy changed SQL
-        run: bash scripts/deploy.sh "${{ github.event.before }}" "${{ github.sha }}"
+          BEFORE="${{ github.event_name == 'push' && github.event.before || inputs.before }}"
+          FLAGS=""
+          if [ "${{ inputs.force_smoke_failure }}" = "true" ]; then FLAGS="--force-smoke-failure"; fi
+          python3 scripts/ci/ci.py deploy --before "$BEFORE" --after "${{ github.sha }}" $FLAGS

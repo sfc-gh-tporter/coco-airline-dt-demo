@@ -22,5 +22,12 @@ ALTER USER SVC_GH_ACTIONS_CI SET WORKLOAD_IDENTITY = (
 
 GRANT ROLE AIRLINE_CI_RL TO USER SVC_GH_ACTIONS_CI;
 
+-- Second, named identity for the nightly sweeper (pr_cleanup.yml on a schedule), which
+-- runs on the default branch and so presents the branch-ref subject instead.
+ALTER USER SVC_GH_ACTIONS_CI ADD WORKLOAD IDENTITY nightly_sweeper
+  TYPE    = OIDC
+  ISSUER  = 'https://token.actions.githubusercontent.com'
+  SUBJECT = 'repo:sfc-gh-tporter/coco-airline-dt-demo:ref:refs/heads/main';
+
 -- Verify:
 --   SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER SVC_GH_ACTIONS_CI;
