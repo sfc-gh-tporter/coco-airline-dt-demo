@@ -1,4 +1,6 @@
-name: Deploy (prod)
+name: "DT demo: Deploy (prod)"
+
+# Dynamic Table demo (Dynamic_Table_Action/). Paths in ci.py are relative to that folder.
 
 # Production deploy after a PR merges to main.
 #   - Gate:      the `prod` GitHub environment requires a reviewer approval before this job
@@ -6,21 +8,21 @@ name: Deploy (prod)
 #   - Deploy:    apply the changed SQL; every statement carries QUERY_TAG
 #                'gh:prod:<sha>:<run>:<file>'.
 #   - Smoke:     health-check the deployed objects. On failure, new objects are dropped,
-#                changed objects are re-applied from the `prod-last-good` tag, and the job fails.
-#   - Record:    one row per step in AIRLINE_PROD.OPS.DEPLOY_LOG; move prod-last-good.
+#                changed objects are re-applied from the `dt-prod-last-good` tag, and the job fails.
+#   - Record:    one row per step in AIRLINE_PROD.OPS.DEPLOY_LOG; move dt-prod-last-good.
 # Auth: OIDC only. SNOWFLAKE_ACCOUNT is the only secret.
 
 on:
   push:
     branches: [main]
     paths:
-      - "sql/**"
+      - "Dynamic_Table_Action/sql/**"
   workflow_dispatch:
     inputs:
       before:
-        description: "Deploy files changed since this ref (default: prod-last-good)"
+        description: "Deploy files changed since this ref (default: dt-prod-last-good)"
         required: false
-        default: "prod-last-good"
+        default: "dt-prod-last-good"
       force_smoke_failure:
         description: "Rollback drill: fail the smoke test on purpose"
         type: boolean
@@ -28,11 +30,15 @@ on:
 
 permissions:
   id-token: write
-  contents: write   # move the prod-last-good tag after a healthy deploy
+  contents: write   # move the dt-prod-last-good tag after a healthy deploy
 
 concurrency:
-  group: deploy-prod
+  group: dt-deploy-prod
   cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: Dynamic_Table_Action
 
 jobs:
   deploy:

@@ -23,7 +23,10 @@ Pull request (validation only - data parity is proven in the developer sandbox):
 Prod deploy (after merge, behind the `prod` environment approval):
   deploy      --before SHA --after SHA       Apply changed SQL (query-tagged); roll back on error.
   smoke       [--force-failure]              Health-check deployed objects; roll back on failure.
-  record                                     DEPLOY_LOG rows; move prod-last-good when healthy.
+  record                                     DEPLOY_LOG rows; move dt-prod-last-good when healthy.
+
+Run from the Dynamic_Table_Action/ folder (the workflows set working-directory): every file
+path here is relative to that folder, because the repo also holds the dbt demo.
 """
 import argparse
 import datetime as dt
@@ -45,6 +48,7 @@ DEPLOY_ORDER = ["sql/ops/", "sql/staging/tables/", "sql/data_gen/", "sql/curated
 DOCUMENTED_KINDS = ("TABLE", "DYNAMIC TABLE", "VIEW")
 COMMENT_MARKER = "<!-- coco-ci-report -->"
 STATE = os.environ.get("CI_STATE", "ci_state.json")
+LAST_GOOD_TAG = "dt-prod-last-good"
 
 REF_RE = re.compile(r"\bAIRLINE_PROD\.(STAGING|CURATED)\.([A-Z0-9_]+)\b", re.I)
 DEF_RE = re.compile(
@@ -115,7 +119,9 @@ def git(*a):
 
 
 def changed_files(base, head):
-    return sorted(f for f in git("diff", "--name-only", f"{base}...{head}").splitlines() if f.strip())
+    # --relative: paths relative to the current folder (Dynamic_Table_Action/), changes elsewhere dropped
+    return sorted(f for f in git("diff", "--name-only", "--relative", f"{base}...{head}").splitlines()
+                  if f.strip())
 
 
 def repo_slug():
@@ -469,7 +475,7 @@ def cmd_smoke(a):
 
 
 def rollback(st):
-    """New objects are dropped; changed objects are re-applied from the prod-last-good tag."""
+    """New objects are dropped; changed objects are re-applied from the dt-prod-last-good tag."""
     tag = f"gh:prod:{st['sha'][:12]}:{run_id()}:rollback"
     pre = {tuple(o) for o in st["pre_existing"]}
     for s, n in st["objects"]:
@@ -488,10 +494,11 @@ def rollback(st):
             continue
         start = now_iso()
         try:
-            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{git('show', f'prod-last-good:{f}')}")
-            status, msg = "SUCCESS", "re-applied from prod-last-good"
+            # "./" makes the path relative to the current folder, not the repo root
+            sf(f"ALTER SESSION SET QUERY_TAG = '{tag}';\n{git('show', f'{LAST_GOOD_TAG}:./{f}')}")
+            status, msg = "SUCCESS", f"re-applied from {LAST_GOOD_TAG}"
         except (subprocess.CalledProcessError, SqlError) as e:
-            status, msg = "FAILED", f"could not restore from prod-last-good: {e}"
+            status, msg = "FAILED", f"could not restore from {LAST_GOOD_TAG}: {e}"
         log_entry(st, f, "ROLLBACK", status, tag, msg, start)
         print(f"  rollback: {f}: {msg}")
 
@@ -515,12 +522,12 @@ def cmd_record(a):
     if st.get("status") == "HEALTHY" and os.environ.get("GITHUB_ACTIONS"):
         slug = repo_slug()
         try:
-            gh_api("-X", "PATCH", f"repos/{slug}/git/refs/tags/prod-last-good", "-f", f"sha={st['sha']}",
+            gh_api("-X", "PATCH", f"repos/{slug}/git/refs/tags/{LAST_GOOD_TAG}", "-f", f"sha={st['sha']}",
                    "-F", "force=true")
         except RuntimeError:
-            gh_api("-X", "POST", f"repos/{slug}/git/refs", "-f", "ref=refs/tags/prod-last-good",
+            gh_api("-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref=refs/tags/{LAST_GOOD_TAG}",
                    "-f", f"sha={st['sha']}")
-        print(f"prod-last-good -> {st['sha'][:7]}")
+        print(f"{LAST_GOOD_TAG} -> {st['sha'][:7]}")
     return 0 if st.get("status") in ("HEALTHY", "NOTHING") else 1
 
 

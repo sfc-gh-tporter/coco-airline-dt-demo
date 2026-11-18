@@ -1,15 +1,22 @@
-# Secrets / keys - NEVER commit
+# Secrets / keys - NEVER commit (matches at any depth, both demos)
 keys/
 *.p8
 *.pem
 *.pub
 .snowflake/connections.toml
 config.toml
+.env
 
 # Python
 .venv/
 __pycache__/
 *.pyc
+
+# dbt
+target/
+logs/
+dbt_packages/
+.user.yml
 
 # OS
 .DS_Store
@@ -19,3 +26,4 @@ __pycache__/
 
 # CI step state
 ci_state.json
+dbt_ci_state.json
