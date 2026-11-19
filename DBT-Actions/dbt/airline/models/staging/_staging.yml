@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: stg_flight_status_events
+    description: Ops feed status events with the JSON payload parsed into typed columns.
+    columns:
+      - name: event_id
+        description: Event key.
+        tests: [not_null]
+      - name: flight_id
+        description: Flight the event is about.
+        tests: [not_null]
+      - name: event_ts
+        description: When ops reported the event.
+      - name: status
+        description: ON_TIME, DELAYED, GATE_CHANGE or CANCELLED.
+        tests:
+          - accepted_values:
+              values: [ON_TIME, DELAYED, GATE_CHANGE, CANCELLED]
+      - name: gate
+        description: Departure gate.
+      - name: delay_minutes
+        description: Departure delay in minutes (0 when on time).
+      - name: delay_code
+        description: Ops delay code on DELAYED / CANCELLED events (WX, ATC, MX, CREW, PAX, LATE_AIRCRAFT).
+      - name: actual_dep_ts
+        description: Actual departure time (null when cancelled).
+      - name: actual_arr_ts
+        description: Actual arrival time (null when cancelled).
+      - name: source
+        description: System that reported the event.

@@ -1,0 +1,29 @@
+name: airline
+version: "1.0.0"
+config-version: 2
+profile: airline
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+# Slim CI selects the changed slice with the `changed_slice` selector (selectors.yml).
+
+# Every model is a Snowflake dynamic table. Lag and scheduler are set per target by the
+# dt_schedule() macro in each model (prod: Snowflake-managed refresh; dev/ci: dbt-managed).
+models:
+  airline:
+    +materialized: dynamic_table
+    +snowflake_warehouse: "{{ 'AIRLINE_DBT_CI_WH' if target.name == 'ci' else 'AIRLINE_DBT_WH' }}"
+    +refresh_mode: INCREMENTAL
+    +on_configuration_change: apply
+    +persist_docs:
+      relation: true
+      columns: true
+    staging:
+      +schema: staging
+    intermediate:
+      +schema: intermediate
+    marts:
+      +schema: marts
