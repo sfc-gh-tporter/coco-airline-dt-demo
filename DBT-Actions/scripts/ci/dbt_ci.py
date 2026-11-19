@@ -173,7 +173,7 @@ def summary(md):
 def check(st, name, status, detail, secs=None, step=None):
     st.setdefault("checks", []).append({"name": name, "status": status, "detail": detail, "secs": secs})
     if step:
-        st.setdefault("log", []).append({"step": step, "status": {"PASS": "SUCCESS", "FAIL": "FAILED"}.get(status, status),
+        st.setdefault("log", []).append({"step": step, "status": {"PASS": "SUCCESS", "FAIL": "FAILED", "SKIP": "SKIPPED"}.get(status, status),
                                          "message": detail[:3900], "query_tag": run_tag(step.lower()),
                                          "started_at": now_iso(-(secs or 0)), "finished_at": now_iso()})
     save_state(st)

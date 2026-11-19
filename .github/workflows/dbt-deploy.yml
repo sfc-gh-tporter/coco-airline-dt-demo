@@ -41,6 +41,7 @@ jobs:
       SNOWFLAKE_WAREHOUSE: AIRLINE_DBT_WH
       GH_TOKEN: ${{ github.token }}
       DB: AIRLINE_DBT_PROD
+      DBT_CI_PROD: "1"          # query tags read gh:dbt:prod:...
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
