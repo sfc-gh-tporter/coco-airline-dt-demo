@@ -90,6 +90,14 @@ models:
         tests:
           - accepted_values:
               values: [ON_TIME, DELAY_16_60, DELAY_61_120, DELAY_120_PLUS, CANCELLED]
+      - name: delay_cause
+        description: Why a disrupted (late or cancelled) flight was disrupted, from the ops delay code; NONE when on time.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [NONE, WEATHER, AIR_TRAFFIC_CONTROL, MAINTENANCE, CREW, PASSENGER, LATE_INBOUND_AIRCRAFT, UNKNOWN]
+      - name: is_controllable_delay
+        description: TRUE when a disrupted flight's cause is within the airline's control (maintenance, crew, late inbound aircraft).
 
   - name: int_flight_performance
     description: "One row per flight: operations joined to commercial results."
@@ -131,6 +139,10 @@ models:
         description: Not cancelled and departing 15 minutes late or less.
       - name: delay_bucket
         description: Delay bucket from int_flight_operations.
+      - name: delay_cause
+        description: Disruption cause from int_flight_operations; NONE when on time.
+      - name: is_controllable_delay
+        description: TRUE when a disrupted flight's cause is within the airline's control.
       - name: seats_sold
         description: Seats booked (0 when no bookings).
       - name: revenue_usd
