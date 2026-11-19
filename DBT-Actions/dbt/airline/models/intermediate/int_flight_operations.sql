@@ -32,19 +32,7 @@ SELECT
         WHEN s.delay_minutes <= 60           THEN 'DELAY_16_60'
         WHEN s.delay_minutes <= 120          THEN 'DELAY_61_120'
         ELSE 'DELAY_120_PLUS'
-    END                                                 AS delay_bucket,
-    CASE
-        WHEN COALESCE(s.latest_status <> 'CANCELLED' AND s.delay_minutes <= 15, TRUE) THEN 'NONE'
-        WHEN s.latest_delay_code = 'WX'            THEN 'WEATHER'
-        WHEN s.latest_delay_code = 'ATC'           THEN 'AIR_TRAFFIC_CONTROL'
-        WHEN s.latest_delay_code = 'MX'            THEN 'MAINTENANCE'
-        WHEN s.latest_delay_code = 'CREW'          THEN 'CREW'
-        WHEN s.latest_delay_code = 'PAX'           THEN 'PASSENGER'
-        WHEN s.latest_delay_code = 'LATE_AIRCRAFT' THEN 'LATE_INBOUND_AIRCRAFT'
-        ELSE 'UNKNOWN'
-    END                                                 AS delay_cause,
-    NOT COALESCE(s.latest_status <> 'CANCELLED' AND s.delay_minutes <= 15, TRUE)
-        AND s.latest_delay_code IN ('MX', 'CREW', 'LATE_AIRCRAFT') AS is_controllable_delay
+    END                                                 AS delay_bucket
 FROM {{ source('raw', 'flights') }}       f
 JOIN {{ source('raw', 'airports') }}      o ON o.iata = f.origin
 JOIN {{ source('raw', 'airports') }}      d ON d.iata = f.dest

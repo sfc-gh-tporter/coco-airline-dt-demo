@@ -20,8 +20,6 @@ SELECT
     o.delay_minutes,
     o.is_on_time,
     o.delay_bucket,
-    o.delay_cause,
-    o.is_controllable_delay,
     COALESCE(b.seats_sold, 0)            AS seats_sold,
     COALESCE(b.revenue_usd, 0)           AS revenue_usd,
     COALESCE(b.premium_seats_sold, 0)    AS premium_seats_sold,

@@ -13,8 +13,6 @@ models:
           expression: "on_time_flights + delayed_flights + cancelled_flights = flights"
       - dbt_utils.expression_is_true:
           expression: "load_factor BETWEEN 0 AND 1.2"
-      - dbt_utils.expression_is_true:
-          expression: "controllable_disruptions + uncontrollable_disruptions = delayed_flights + cancelled_flights"
     columns:
       - name: route
         description: Origin-destination pair, e.g. ATL-LAX.
@@ -34,12 +32,6 @@ models:
         description: Flights not cancelled and departing more than 15 minutes late.
       - name: total_delay_minutes
         description: Sum of departure delay minutes over flights that operated.
-      - name: controllable_disruptions
-        description: Late or cancelled flights with a controllable cause (maintenance, crew, late inbound aircraft).
-      - name: uncontrollable_disruptions
-        description: Late or cancelled flights with an uncontrollable or unknown cause (weather, ATC, passenger).
-      - name: controllable_delay_minutes
-        description: Delay minutes on operated flights with a controllable cause.
       - name: seat_capacity
         description: Seats offered (sum of aircraft seat capacity).
       - name: seats_sold
@@ -77,12 +69,6 @@ models:
         description: Flights not cancelled and departing more than 15 minutes late.
       - name: total_delay_minutes
         description: Sum of departure delay minutes over flights that operated.
-      - name: controllable_disruptions
-        description: Late or cancelled flights with a controllable cause.
-      - name: uncontrollable_disruptions
-        description: Late or cancelled flights with an uncontrollable or unknown cause.
-      - name: controllable_delay_minutes
-        description: Delay minutes on operated flights with a controllable cause.
       - name: seat_capacity
         description: Seats offered.
       - name: seats_sold
