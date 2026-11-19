@@ -1,4 +1,8 @@
-name: CI (pull request)
+name: "DT demo: CI (pull request)"
+
+# Dynamic Table demo (Dynamic_Table_Action/). Runs only when a PR touches that folder or
+# this workflow; the dbt demo (DBT-Actions/) has its own dbt-pr.yml. Both jobs are named
+# `ci` so the required check on main is satisfied by whichever demo a PR changes.
 
 # Thin, visible checks on every pull request. Each step is one check:
 #   Plan          which pipeline objects this PR changes (no Snowflake)
@@ -16,6 +20,9 @@ name: CI (pull request)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:
+      - "Dynamic_Table_Action/**"
+      - ".github/workflows/dt-pr.yml"
 
 permissions:
   id-token: write        # mint the OIDC token Snowflake validates
@@ -24,8 +31,12 @@ permissions:
   issues: write
 
 concurrency:
-  group: ci-pr-${{ github.event.pull_request.number }}
+  group: dt-ci-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: Dynamic_Table_Action
 
 jobs:
   ci:

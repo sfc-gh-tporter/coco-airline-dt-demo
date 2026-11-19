@@ -44,7 +44,9 @@
 --
 -- 4) GITHUB (one time): public repo; secret SNOWFLAKE_ACCOUNT; environment `prod` with a
 --    required reviewer (deployment branch: main); ruleset on main requiring a pull request
---    and the `ci` status check. Tag the baseline:  git tag -f baseline-v1 && push the tag.
+--    and the `ci` status check. Tag the baseline (the repo also holds the dbt demo, so the
+--    DT demo's tags are prefixed):  git tag -f dt-baseline-v1 && git tag -f dt-prod-last-good
+--    && push both tags.
 --
 -- NOTE: The incremental dynamic table is authored LIVE during the demo (in the presenter's
 --       AIRLINE_DEV sandbox, then shipped by PR). A validated reference copy lives on the
