@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: int_flight_status
+    description: Latest known status per flight (the most recent ops event wins).
+    columns:
+      - name: flight_id
+        description: Flight key.
+        tests: [unique, not_null]
+      - name: latest_status
+        description: Status from the most recent ops event.
+      - name: latest_gate
+        description: Gate from the most recent ops event.
+      - name: delay_minutes
+        description: Departure delay in minutes from the most recent ops event.
+      - name: latest_delay_code
+        description: Ops delay code from the most recent event (DELAYED / CANCELLED only).
+      - name: actual_dep_ts
+        description: Actual departure time from the most recent event.
+      - name: actual_arr_ts
+        description: Actual arrival time from the most recent event.
+      - name: status_as_of_ts
+        description: Timestamp of the event the status comes from.
+
+  - name: int_bookings_by_flight
+    description: Bookings rolled up to one row per flight.
+    columns:
+      - name: flight_id
+        description: Flight key.
+        tests: [unique, not_null]
+      - name: seats_sold
+        description: Seats booked on the flight.
+      - name: revenue_usd
+        description: Booked fare revenue (USD).
+      - name: premium_seats_sold
+        description: Seats booked in PREMIUM, BUSINESS or FIRST.
+      - name: direct_channel_seats
+        description: Seats booked on WEB or MOBILE.
+
+  - name: int_flight_operations
+    description: >
+      Operational view of each flight: schedule, network, fleet and latest status, with the
+      business rules for on-time, cancelled and delay buckets.
+    columns:
+      - name: flight_id
+        description: Flight key.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: source('raw', 'flights')
+              field: flight_id
+      - name: flight_number
+        description: Marketing flight number.
+      - name: route
+        description: Origin-destination pair, e.g. ATL-LAX.
+      - name: origin
+        description: Origin IATA code.
+      - name: dest
+        description: Destination IATA code.
+      - name: origin_region
+        description: Network region of the origin airport.
+      - name: dest_region
+        description: Network region of the destination airport.
+      - name: is_hub_departure
+        description: TRUE when the flight departs a hub.
+      - name: flight_date
+        description: Scheduled departure date (UTC).
+      - name: departure_bank
+        description: MORNING (05-10), MIDDAY (11-16), EVENING (17-21) or NIGHT, by scheduled departure hour.
+      - name: aircraft_type
+        description: Planned aircraft type.
+      - name: aircraft_family
+        description: REGIONAL, NARROWBODY or WIDEBODY.
+      - name: seat_capacity
+        description: Seats offered on the flight.
+      - name: flight_status
+        description: Latest status, or SCHEDULED when no ops event has arrived.
+        tests:
+          - accepted_values:
+              values: [SCHEDULED, ON_TIME, DELAYED, GATE_CHANGE, CANCELLED]
+      - name: is_cancelled
+        description: TRUE when the latest status is CANCELLED.
+      - name: delay_minutes
+        description: Departure delay in minutes (0 when unknown).
+      - name: is_on_time
+        description: Not cancelled and departing 15 minutes late or less.
+      - name: delay_bucket
+        description: ON_TIME, DELAY_16_60, DELAY_61_120, DELAY_120_PLUS or CANCELLED.
+        tests:
+          - accepted_values:
+              values: [ON_TIME, DELAY_16_60, DELAY_61_120, DELAY_120_PLUS, CANCELLED]
+
+  - name: int_flight_performance
+    description: "One row per flight: operations joined to commercial results."
+    columns:
+      - name: flight_id
+        description: Flight key.
+        tests: [unique, not_null]
+      - name: flight_number
+        description: Marketing flight number.
+      - name: route
+        description: Origin-destination pair.
+      - name: origin
+        description: Origin IATA code.
+      - name: dest
+        description: Destination IATA code.
+      - name: origin_region
+        description: Network region of the origin airport.
+      - name: dest_region
+        description: Network region of the destination airport.
+      - name: is_hub_departure
+        description: TRUE when the flight departs a hub.
+      - name: flight_date
+        description: Scheduled departure date (UTC).
+      - name: departure_bank
+        description: Scheduled departure bank.
+      - name: aircraft_type
+        description: Planned aircraft type.
+      - name: aircraft_family
+        description: REGIONAL, NARROWBODY or WIDEBODY.
+      - name: seat_capacity
+        description: Seats offered on the flight.
+      - name: flight_status
+        description: Latest status, or SCHEDULED.
+      - name: is_cancelled
+        description: TRUE when the latest status is CANCELLED.
+      - name: delay_minutes
+        description: Departure delay in minutes.
+      - name: is_on_time
+        description: Not cancelled and departing 15 minutes late or less.
+      - name: delay_bucket
+        description: Delay bucket from int_flight_operations.
+      - name: seats_sold
+        description: Seats booked (0 when no bookings).
+      - name: revenue_usd
+        description: Booked fare revenue (USD).
+      - name: premium_seats_sold
+        description: Seats booked in PREMIUM, BUSINESS or FIRST.
+      - name: direct_channel_seats
+        description: Seats booked on WEB or MOBILE.

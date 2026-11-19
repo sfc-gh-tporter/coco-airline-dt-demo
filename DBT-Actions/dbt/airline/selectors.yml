@@ -1,0 +1,20 @@
+# Named selectors shared by the dev loop, CI and the prod deploy.
+#
+# changed_slice: models whose SQL changed, models that use a changed macro, and new models,
+# plus everything downstream of them. Config differences are deliberately NOT a trigger:
+# warehouse / scheduler / lag are rendered per target (dev and CI vs prod), so comparing
+# rendered configs against prod state would flag every model.
+selectors:
+  - name: changed_slice
+    description: Changed or new models and all their downstream dependencies
+    definition:
+      union:
+        - method: state
+          value: modified.body
+          children: true
+        - method: state
+          value: modified.macros
+          children: true
+        - method: state
+          value: new
+          children: true

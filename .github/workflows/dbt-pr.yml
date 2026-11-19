@@ -1,0 +1,93 @@
+name: "dbt demo: Slim CI (pull request)"
+
+# dbt dynamic-table DAG demo (DBT-Actions/). Tests ONLY the slice of the DAG a PR changes:
+#   Clone prod     zero-copy clone into AIRLINE_DBT_PR_<n> (guarded proc; DTs start suspended)
+#   Deploy         the PR's dbt project object, into that clone
+#   Blast radius   models changed vs prod's last successful run, plus everything downstream
+#   Baseline       zero-copy snapshot of that slice (same data the rebuild will read)
+#   Build + test   dbt build of the slice only; tests run in DAG order
+#   Parity         row counts and existing columns unchanged; still INCREMENTAL
+#   Report         one sticky PR comment; Clean up drops the clone
+#
+# Auth: GitHub OIDC -> Snowflake workload identity federation. The job declares the dbt-ci
+# environment (no reviewers) so its subject is unique in this repo; the CI identity holds
+# AIRLINE_DBT_CI_RL (read-only on prod). SNOWFLAKE_ACCOUNT is the only secret. The job is named
+# `ci` so it satisfies the required check on main, like the DT demo's dt-pr.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "DBT-Actions/**"
+      - ".github/workflows/dbt-pr.yml"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: dbt-ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: DBT-Actions
+
+jobs:
+  ci:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: dbt-ci
+    timeout-minutes: 20
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_ROLE: AIRLINE_DBT_CI_RL
+      SNOWFLAKE_WAREHOUSE: AIRLINE_DBT_CI_WH
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_DB: AIRLINE_DBT_PR_${{ github.event.pull_request.number }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Snowflake CLI (OIDC)
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: "3.18"
+
+      - name: Who am I
+        run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
+
+      - name: Clone prod (zero-copy)
+        run: python3 scripts/ci/dbt_ci.py clone --db "$PR_DB"
+
+      - name: Deploy PR dbt project
+        run: python3 scripts/ci/dbt_ci.py deploy --db "$PR_DB"
+
+      - name: Blast radius (state:modified+)
+        run: python3 scripts/ci/dbt_ci.py slice --db "$PR_DB"
+
+      - name: Parity baseline
+        run: python3 scripts/ci/dbt_ci.py baseline --db "$PR_DB"
+
+      - name: Build + test slice
+        run: python3 scripts/ci/dbt_ci.py build --db "$PR_DB"
+
+      - name: Parity
+        if: success() || failure()
+        run: python3 scripts/ci/dbt_ci.py parity --db "$PR_DB"
+
+      - name: Report
+        if: always()
+        run: python3 scripts/ci/dbt_ci.py report --pr "$PR" --head "$HEAD_SHA"
+
+      - name: Clean up
+        if: always()
+        run: python3 scripts/ci/dbt_ci.py cleanup --db "$PR_DB"

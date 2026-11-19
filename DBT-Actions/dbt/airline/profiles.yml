@@ -1,0 +1,39 @@
+# Connection profile for dbt Projects on Snowflake. account / user are placeholders: the
+# project object runs as the calling Snowflake user with the role named per target.
+#
+#   dev   presenter dev clone      AIRLINE_DBT_DEV (override with DBT_TARGET_DATABASE)
+#   ci    per-PR clone             AIRLINE_DBT_PR_<n> (CI passes DBT_TARGET_DATABASE)
+#   prod  production               AIRLINE_DBT_PROD
+airline:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "_"
+      user: "_"
+      role: AIRLINE_DBT_CI_RL
+      warehouse: AIRLINE_DBT_WH
+      database: "{{ env_var('DBT_TARGET_DATABASE', 'AIRLINE_DBT_DEV') }}"
+      schema: dbt
+      threads: 8
+      query_tag: "{{ env_var('DBT_QUERY_TAG', 'dbt:airline') }}"
+    ci:
+      type: snowflake
+      account: "_"
+      user: "_"
+      role: AIRLINE_DBT_CI_RL
+      warehouse: AIRLINE_DBT_CI_WH
+      database: "{{ env_var('DBT_TARGET_DATABASE', 'AIRLINE_DBT_CI_UNSET') }}"
+      schema: dbt
+      threads: 8
+      query_tag: "{{ env_var('DBT_QUERY_TAG', 'dbt:airline') }}"
+    prod:
+      type: snowflake
+      account: "_"
+      user: "_"
+      role: AIRLINE_DBT_DEPLOY_RL
+      warehouse: AIRLINE_DBT_WH
+      database: AIRLINE_DBT_PROD
+      schema: dbt
+      threads: 8
+      query_tag: "{{ env_var('DBT_QUERY_TAG', 'dbt:airline') }}"

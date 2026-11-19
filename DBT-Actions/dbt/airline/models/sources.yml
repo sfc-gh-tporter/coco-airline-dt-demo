@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw airline data loaded by the synthetic generator (change tracking on).
+    database: "{{ target.database }}"   # follows the target, so dev / CI clones read their own copy
+    schema: raw
+    tables:
+      - name: airports
+        description: Airport reference data, one row per airport.
+      - name: aircraft
+        description: Fleet reference data, one row per aircraft type.
+      - name: flights
+        description: Published schedule, one row per scheduled flight.
+      - name: bookings
+        description: Booking fact, one row per seat sold.
+      - name: flight_status_events
+        description: Operational flight status events from the ops feed (JSON payload).

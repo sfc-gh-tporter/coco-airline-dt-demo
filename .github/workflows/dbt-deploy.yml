@@ -1,0 +1,74 @@
+name: "dbt demo: Deploy (prod)"
+
+# Prod deploy for the dbt dynamic-table DAG demo (DBT-Actions/), after a PR merges to main.
+#   Gate          the dbt-prod environment requires a reviewer before the job can mint its OIDC
+#                 token (the deploy identity trusts environment:dbt-prod only)
+#   Deploy        update the prod dbt project object
+#   Blast radius  models changed since the last successful prod run, plus downstream
+#   Build         recreate ONLY that slice in prod (Snowflake-managed refresh, target lag);
+#                 unchanged upstream dynamic tables keep running untouched
+#   Smoke test    slice DTs exist, are ACTIVE and INCREMENTAL, and have rows
+#   Record        one row per step in AIRLINE_DBT_PROD.OPS.DEPLOY_LOG; move dbt-prod-last-good
+# Every statement carries QUERY_TAG 'gh:dbt:prod:<sha>:<run>:<step>'.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "DBT-Actions/dbt/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write   # move the dbt-prod-last-good tag after a healthy deploy
+
+concurrency:
+  group: dbt-deploy-prod
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: DBT-Actions
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dbt-prod
+    timeout-minutes: 30
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_ROLE: AIRLINE_DBT_DEPLOY_RL
+      SNOWFLAKE_WAREHOUSE: AIRLINE_DBT_WH
+      GH_TOKEN: ${{ github.token }}
+      DB: AIRLINE_DBT_PROD
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Snowflake CLI (OIDC)
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: "3.18"
+
+      - name: Who am I
+        run: snow sql -x -q "SELECT CURRENT_USER() AS user, CURRENT_ROLE() AS role"
+
+      - name: Deploy dbt project
+        run: python3 scripts/ci/dbt_ci.py deploy --db "$DB" --prod
+
+      - name: Blast radius
+        run: python3 scripts/ci/dbt_ci.py slice --db "$DB" --prod
+
+      - name: Build changed slice
+        run: python3 scripts/ci/dbt_ci.py build --db "$DB" --prod
+
+      - name: Smoke test
+        run: python3 scripts/ci/dbt_ci.py smoke --db "$DB"
+
+      - name: Record
+        if: always()
+        run: python3 scripts/ci/dbt_ci.py record

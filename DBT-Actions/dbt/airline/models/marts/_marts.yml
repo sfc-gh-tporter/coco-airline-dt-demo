@@ -1,0 +1,81 @@
+version: 2
+
+models:
+  - name: mart_route_daily
+    description: >
+      Route x day KPI mart: flights, cancellations, punctuality, delay minutes, capacity, seats
+      sold and revenue. Additive sums and counts plus derived rates. Snowflake-managed refresh
+      (10 minute target lag in prod).
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [route, flight_date]
+      - dbt_utils.expression_is_true:
+          expression: "on_time_flights + delayed_flights + cancelled_flights = flights"
+      - dbt_utils.expression_is_true:
+          expression: "load_factor BETWEEN 0 AND 1.2"
+    columns:
+      - name: route
+        description: Origin-destination pair, e.g. ATL-LAX.
+        tests: [not_null]
+      - name: flight_date
+        description: Scheduled departure date (UTC).
+        tests: [not_null]
+      - name: origin_region
+        description: Network region of the origin airport.
+      - name: flights
+        description: Scheduled flights on the route that day.
+      - name: cancelled_flights
+        description: Flights whose latest status is CANCELLED.
+      - name: on_time_flights
+        description: Flights not cancelled and departing 15 minutes late or less.
+      - name: delayed_flights
+        description: Flights not cancelled and departing more than 15 minutes late.
+      - name: total_delay_minutes
+        description: Sum of departure delay minutes over flights that operated.
+      - name: seat_capacity
+        description: Seats offered (sum of aircraft seat capacity).
+      - name: seats_sold
+        description: Seats booked.
+      - name: revenue_usd
+        description: Booked fare revenue (USD).
+      - name: load_factor
+        description: seats_sold / seat_capacity.
+      - name: on_time_pct
+        description: 100 * on_time_flights / flights.
+
+  - name: mart_network_weekly
+    description: >
+      Network scorecard: origin region x ISO week, rolled up from mart_route_daily. Snowflake-
+      managed refresh (10 minute target lag in prod).
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [origin_region, week_start]
+    columns:
+      - name: origin_region
+        description: Network region of the origin airport.
+        tests: [not_null]
+      - name: week_start
+        description: Monday of the ISO week (scheduled departure).
+        tests: [not_null]
+      - name: route_days
+        description: Route x day rows rolled into the week (routes flown, counted per day).
+      - name: flights
+        description: Scheduled flights in the week.
+      - name: cancelled_flights
+        description: Flights whose latest status is CANCELLED.
+      - name: on_time_flights
+        description: Flights not cancelled and departing 15 minutes late or less.
+      - name: delayed_flights
+        description: Flights not cancelled and departing more than 15 minutes late.
+      - name: total_delay_minutes
+        description: Sum of departure delay minutes over flights that operated.
+      - name: seat_capacity
+        description: Seats offered.
+      - name: seats_sold
+        description: Seats booked.
+      - name: revenue_usd
+        description: Booked fare revenue (USD).
+      - name: load_factor
+        description: seats_sold / seat_capacity.
+      - name: on_time_pct
+        description: 100 * on_time_flights / flights.
