@@ -23,7 +23,9 @@ airline:
       user: "_"
       role: AIRLINE_DBT_CI_RL
       warehouse: AIRLINE_DBT_CI_WH
-      database: "{{ env_var('DBT_TARGET_DATABASE', 'AIRLINE_DBT_CI_UNSET') }}"
+      # Deploy-time compile needs a database the CI role can USE; prod is read-only for it, so a
+      # missing override can never write there. Every CI execution passes DBT_TARGET_DATABASE.
+      database: "{{ env_var('DBT_TARGET_DATABASE', 'AIRLINE_DBT_PROD') }}"
       schema: dbt
       threads: 8
       query_tag: "{{ env_var('DBT_QUERY_TAG', 'dbt:airline') }}"

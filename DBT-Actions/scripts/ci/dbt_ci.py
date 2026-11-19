@@ -218,6 +218,8 @@ def cmd_deploy(a):
            "--dbt-version", DBT_VERSION, "--external-access-integration", PKG_EAI, *conn_args()]
     if a.prod:
         cmd += ["--default-target", "prod"]
+    else:
+        cmd += ["--default-target", "ci"]   # deploy-time compile; executions override the database
     t = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
