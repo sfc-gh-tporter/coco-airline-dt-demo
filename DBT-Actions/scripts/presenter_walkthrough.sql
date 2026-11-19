@@ -113,10 +113,17 @@ CALL data_gen.sp_generate_airline_data(1.0, 'LIVE');       -- ~400 bookings + ~2
 ALTER DYNAMIC TABLE airline_dbt_prod.marts.mart_network_weekly REFRESH;   -- refreshes upstream in order
 SELECT name, refresh_action, state,
        statistics:numInsertedRows::INT AS inserted, statistics:numDeletedRows::INT AS deleted,
-       DATEDIFF('second', refresh_start_time, refresh_end_time) AS secs
-FROM TABLE(airline_dbt_prod.information_schema.dynamic_table_refresh_history(RESULT_LIMIT => 20))
-ORDER BY refresh_start_time DESC;
--- Expect refresh_action = INCREMENTAL on every model, with row counts in the hundreds, not millions.
+       DATEDIFF('millisecond', refresh_start_time, refresh_end_time) / 1000 AS secs
+FROM TABLE(airline_dbt_prod.information_schema.dynamic_table_refresh_history(
+       NAME_PREFIX => 'AIRLINE_DBT_PROD.', RESULT_LIMIT => 200))
+WHERE data_timestamp = (
+  SELECT MAX(data_timestamp)
+  FROM TABLE(airline_dbt_prod.information_schema.dynamic_table_refresh_history(
+         NAME => 'AIRLINE_DBT_PROD.MARTS.MART_NETWORK_WEEKLY'))
+  WHERE refresh_trigger = 'MANUAL')
+ORDER BY refresh_start_time;
+-- Expect all 7 models INCREMENTAL, a few hundred rows each (dry run: 250 events, 396 booking
+-- rollups, 14 of 371 weekly rows), about 3 seconds per model.
 USE ROLE sysadmin;
 
 -- -------------------------------------------------------------------------------------
